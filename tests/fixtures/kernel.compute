@@ -1,0 +1,10 @@
+#pragma kernel CSMain
+#pragma kernel Missing
+
+RWStructuredBuffer<float> _Values;
+
+[numthreads(8, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    _Values[id.x] = notDeclared;
+}
