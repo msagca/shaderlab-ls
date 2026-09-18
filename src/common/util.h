@@ -18,7 +18,7 @@ std::optional<std::string> readFile(const std::filesystem::path& path);
 
 std::filesystem::path uriToPath(std::string_view uri);
 std::string pathToUri(const std::filesystem::path& path);
-// Absolute, lexically normal, forward slashes, lowercase: for comparing paths on Windows.
+// Absolute, lexically normal, forward slashes, and lowercase where the file system ignores case: for comparing paths.
 std::string pathKey(const std::filesystem::path& path);
 // Absolute path with forward slashes, preserving case: for #line directives and display.
 std::string displayPath(const std::filesystem::path& path);

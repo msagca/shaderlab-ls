@@ -4,8 +4,10 @@ Usage: python tests/run_tests.py path/to/shaderlab-ls.exe
 """
 
 import json
+import os
 import pathlib
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -82,6 +84,33 @@ def uri_for(path):
 
 
 failures = []
+# Set from the server's startup log. Shaders compile with FXC where it exists (Windows) and DXC elsewhere; with
+# neither, HLSL is not compiled, there is one publishDiagnostics per document instead of two, and the compile checks
+# below do not apply.
+compiler = None  # "fxc" or "dxc": what a shader without #pragma use_dxc compiles with
+has_dxc = False
+
+
+def find_dxc():
+    """A DXC to test with: $SHADERLAB_LS_TEST_DXC, else the newest Unity editor's on Windows. None leaves it to the
+    server, which then looks on the system's library path."""
+    if os.environ.get("SHADERLAB_LS_TEST_DXC"):
+        return os.environ["SHADERLAB_LS_TEST_DXC"]
+    if sys.platform == "win32":
+        hub = pathlib.Path(os.environ.get("ProgramFiles", r"C:\Program Files"), "Unity", "Hub", "Editor")
+        editors = sorted(hub.glob("*/Editor/Data/Tools/dxcompiler.dll"))
+        if editors:
+            return str(editors[-1])
+    return None
+
+
+def diags(client, uri, timeout=15):
+    """The diagnostics of the last pass: the compiler's where there is one, the syntax ones where there is not."""
+    return client.diagnostics(uri, 2 if compiler else 1, timeout=timeout)
+
+
+def skip(description, why="no HLSL compiler"):
+    print(f"  [skip] {description} ({why})")
 
 
 def check(condition, description):
@@ -125,9 +154,13 @@ def main():
             "general": {"positionEncodings": ["utf-16"]},
             "textDocument": {"completion": {"completionItem": {"snippetSupport": True}}},
         },
-        "initializationOptions": {"diagnostics": {"delay": 0}},
+        "initializationOptions": {"diagnostics": {"delay": 0}, **({"dxcPath": find_dxc()} if find_dxc() else {})},
     })
     client.notify("initialized", {})
+    global compiler, has_dxc
+    log = " ".join(m["params"]["message"] for m in client.pending if m.get("method") == "window/logMessage")
+    has_dxc = "DXC (" in log
+    compiler = "fxc" if "FXC (" in log else "dxc" if has_dxc else None
 
     print("initialize")
     caps = init["capabilities"]
@@ -137,7 +170,7 @@ def main():
     print("errors.shader")
     errors = FIXTURES / "errors.shader"
     uri = open_doc(client, errors)
-    d = client.diagnostics(uri, 2)
+    d = diags(client, uri)
     check(has(d, 7, "Unknown property type 'Float2'", 1), "unknown property type")
     check(has(d, 8, "default value of a Color property", 1), "property default value shape")
     check(has(d, 13, "Invalid PreviewType value 'Cube'", 2), "closed tag values")
@@ -148,20 +181,25 @@ def main():
     check(has(d, 25, "from 0 through 255", 1), "Stencil Ref range")
     check(has(d, 26, "Invalid comparison operation 'Sometimes'", 1), "Stencil comparison values")
     check(has(d, 32, "Unknown #pragma target value", 2), "pragma target values")
-    check(has(d, 35, "undeclared identifier 'undefinedThing'", 1, "fxc"), "FXC error mapped into the Pass")
-    fxc = [x for x in d if "undefinedThing" in x["message"]]
-    # "            float4 frag() : SV_Target { /* é */ return _Color * " is 64 UTF-16 units.
-    check(bool(fxc) and fxc[0]["range"]["start"]["character"] == 64, "FXC byte columns converted to UTF-16")
+    if compiler:
+        # FXC says "undeclared identifier", DXC "use of undeclared identifier".
+        check(has(d, 35, "undeclared identifier 'undefinedThing'", 1, compiler), f"{compiler} error mapped into the Pass")
+        compiled = [x for x in d if "undefinedThing" in x["message"]]
+        # "            float4 frag() : SV_Target { /* é */ return _Color * " is 64 UTF-16 units.
+        check(bool(compiled) and compiled[0]["range"]["start"]["character"] == 64,
+              f"{compiler} byte columns converted to UTF-16")
+    else:
+        skip("compile errors mapped into the Pass")
     check(not any(x["range"]["start"]["line"] == 14 for x in d), "valid Blend with a property reference")
 
     print("valid.shader")
     valid_uri = open_doc(client, FIXTURES / "valid.shader")
-    d = client.diagnostics(valid_uri, 2)
+    d = diags(client, valid_uri)
     check(d == [], "no diagnostics for a valid shader: " + "; ".join(x["message"] for x in d))
 
     print("unity_compat.shader")
     compat_uri = open_doc(client, FIXTURES / "unity_compat.shader")
-    d = client.diagnostics(compat_uri, 2)
+    d = diags(client, compat_uri)
     unexpected = [x for x in d if x["severity"] < 4 and "Sideways" not in x["message"]]
     check(unexpected == [], "undocumented forms used by Unity's own shaders are accepted: " + "; ".join(
         f"{x['range']['start']['line'] + 1}: {x['message']}" for x in unexpected))
@@ -175,29 +213,51 @@ def main():
         compute = folder / "bom.compute"
         compute.write_text('#pragma kernel CSMain\n#include "bom.hlsl"\n[numthreads(1, 1, 1)]\nvoid CSMain() { float x = BOM_VALUE; }\n', encoding="utf-8")
         bom_uri = open_doc(client, compute)
-        d = client.diagnostics(bom_uri, 2)
+        d = diags(client, bom_uri)
         check(d == [], "included files with a UTF-8 BOM compile: " + "; ".join(x["message"] for x in d))
         client.notify("textDocument/didClose", {"textDocument": {"uri": bom_uri}})
         client.diagnostics(bom_uri, 1)
 
     print("formatting")
+    check(shutil.which("clang-format") is not None, "clang-format is on PATH (the expected output is laid out with it)")
     # Fixtures may be checked out with CRLF; the formatter keeps whatever it is given, so test with LF explicitly.
     source = (FIXTURES / "format_input.shader").read_bytes().replace(b"\r\n", b"\n")
     expected = (FIXTURES / "format_expected.shader").read_bytes().replace(b"\r\n", b"\n")
-    run = subprocess.run([exe, "--format", "-", "--indent", "4"], input=source, capture_output=True)
+    # The fixtures folder has no .clang-format, so this is Unity's default layout.
+    where = ["--assume-filename", str(FIXTURES / "format_input.shader")]
+    run = subprocess.run([exe, "--format", "-"] + where, input=source, capture_output=True)
     check(run.returncode == 0 and run.stdout == expected, "output matches format_expected.shader")
-    again = subprocess.run([exe, "--format", "-", "--indent", "4"], input=expected, capture_output=True)
+    again = subprocess.run([exe, "--format", "-"] + where, input=expected, capture_output=True)
     check(again.stdout == expected, "formatting is idempotent")
-    crlf = subprocess.run([exe, "--format", "-", "--indent", "4"], input=source.replace(b"\n", b"\r\n"), capture_output=True)
+    check(b"\n\n" not in expected and expected.endswith(b"}\n"),
+          "MaxEmptyLinesToKeep is 0 by default, so the file has no empty lines")
+    check(b"            void main()\n            {\n" in expected, "GLSLPROGRAM blocks are laid out as well")
+    crlf = subprocess.run([exe, "--format", "-"] + where, input=source.replace(b"\n", b"\r\n"), capture_output=True)
     check(crlf.stdout == expected.replace(b"\n", b"\r\n"), "CRLF line endings are preserved")
-    tabs = subprocess.run([exe, "--format", "-", "--indent", "4", "--tabs"], input=expected, capture_output=True).stdout
-    check(b"\n\tProperties" in tabs and b"\n\t\t\tHLSLPROGRAM" in tabs, "--tabs indents with tabs")
+
+    with tempfile.TemporaryDirectory() as temp:
+        # A .clang-format anywhere above the file decides the layout of both the ShaderLab and the HLSL.
+        project = pathlib.Path(temp)
+        (project / ".clang-format").write_text("BasedOnStyle: LLVM\nUseTab: Always\nIndentWidth: 4\nTabWidth: 4\n")
+        shader = project / "Configured.shader"
+        shader.write_bytes(source)
+        styled = subprocess.run([exe, "--format", str(shader)], capture_output=True).stdout
+        check(b"\n\tProperties" in styled and b"\n\t\t\tHLSLPROGRAM" in styled, "UseTab indents with tabs")
+        check(b'Shader "Tests/Format" {' in styled, "BreakBeforeBraces puts the '{' where clang-format would")
+        check(b"\n\t\t\tfloat4 frag() : SV_Target { return 1; }" in styled, "clang-format lays out the HLSL")
+        # LLVM keeps one empty line in a row: one left in the Properties, one in the HLSL, none at a block's edge.
+        check(styled.count(b"\n\n") == 2 and b"\n\n\n" not in styled and styled.endswith(b"}\n"),
+              "MaxEmptyLinesToKeep decides how many empty lines in a row survive")
+        shader.write_bytes(styled)
+        check(subprocess.run([exe, "--format", str(shader)], capture_output=True).stdout == styled,
+              "formatting with a .clang-format is idempotent")
+
     broken = subprocess.run([exe, "--format", str(FIXTURES / "syntax.shader")], capture_output=True)
     check(broken.returncode == 1 and broken.stdout == b"" and b"missing '}'" in broken.stderr, "unbalanced files are refused")
 
     format_uri = uri_for(FIXTURES / "format_input.shader")
     client.notify("textDocument/didOpen", {"textDocument": {"uri": format_uri, "languageId": "shaderlab", "version": 1, "text": source.decode("utf-8")}})
-    client.diagnostics(format_uri, 2)
+    diags(client, format_uri)
     edits = client.request("textDocument/formatting", {"textDocument": {"uri": format_uri}, "options": {"tabSize": 4, "insertSpaces": True}})
     lines = source.decode("utf-8").split("\n")
     check(len(edits) == 1 and edits[0]["newText"] == expected.decode("utf-8")
@@ -213,7 +273,7 @@ def main():
 
     print("syntax.shader")
     syntax_uri = open_doc(client, FIXTURES / "syntax.shader")
-    d = client.diagnostics(syntax_uri, 2)
+    d = diags(client, syntax_uri)
     check(has(d, 5, "'Name' is only valid inside a Pass"), "Name outside a Pass")
     check(has(d, 1, "Missing '}'"), "unclosed block")
     check(has(d, 10, "Unknown #pragma 'banana'", 2), "unknown pragma")
@@ -221,8 +281,20 @@ def main():
 
     print("kernel.compute")
     compute_uri = open_doc(client, FIXTURES / "kernel.compute")
-    d = client.diagnostics(compute_uri, 2)
-    check(has(d, 9, "undeclared identifier 'notDeclared'", 1, "fxc"), "compute kernels compiled with cs_5_0")
+    d = diags(client, compute_uri)
+    if compiler:
+        check(has(d, 9, "undeclared identifier 'notDeclared'", 1, compiler), f"compute kernels compiled with {compiler}")
+    else:
+        skip("compute kernels compiled")
+
+    print("use_dxc.shader")
+    use_dxc_uri = open_doc(client, FIXTURES / "use_dxc.shader")
+    d = diags(client, use_dxc_uri)
+    if has_dxc:
+        check(has(d, 12, "undeclared identifier 'missingInDxc'", 1, "dxc"), "#pragma use_dxc compiles with DXC")
+        check(len([x for x in d if x.get("source") in ("fxc", "dxc")]) == 1, "and with DXC alone")
+    else:
+        skip("#pragma use_dxc compiles with DXC", "no DXC")
 
     print("completion.shader")
     completion = FIXTURES / "completion.shader"

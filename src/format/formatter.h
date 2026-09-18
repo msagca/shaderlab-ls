@@ -3,12 +3,9 @@
 #include <string>
 #include <string_view>
 
-namespace sls {
+#include "format/style.h"
 
-struct FormatOptions {
-  int indentSize = 4;  // also the tab width used to measure existing indentation
-  bool useTabs = false;
-};
+namespace sls {
 
 struct FormatResult {
   bool ok = false;

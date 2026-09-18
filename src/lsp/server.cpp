@@ -4,7 +4,8 @@
 
 #include "common/util.h"
 #include "format/formatter.h"
-#include "fxc/fxc.h"
+#include "compiler/dxc.h"
+#include "compiler/fxc.h"
 
 using json = nlohmann::json;
 
@@ -36,6 +37,26 @@ json diagnosticJson(const Analysis& analysis, const Diagnostic& diagnostic, Enco
           {"message", related.message}}});
   }
   return result;
+}
+
+// Which HLSL compilers there are before any project is known. A project's Unity editor may still bring a DXC.
+json compilerLog(const CheckOptions& options) {
+  const Fxc& fxc = Fxc::instance();
+  const Dxc* dxc = nullptr;
+  if (!options.dxcLibrary.empty() && Dxc::load(options.dxcLibrary).available()) {
+    dxc = &Dxc::load(options.dxcLibrary);
+  } else if (Dxc::load({}).available()) {
+    dxc = &Dxc::load({});
+  }
+  std::string found;
+  if (fxc.available()) found = "FXC (" + fxc.libraryPath() + ")";
+  if (dxc) found += (found.empty() ? "" : ", ") + std::string("DXC (") + dxc->libraryPath() + ")";
+  if (!found.empty()) return {{"type", 3}, {"message", "HLSL compilers: " + found}};
+  return {{"type", 2},
+          {"message", "No HLSL compiler found: FXC exists on Windows only, and there is no " +
+                          std::string(dxcLibraryName()) +
+                          " on the library path or at dxcPath. HLSL is compiled only in projects whose Unity editor "
+                          "ships DXC."}};
 }
 
 }  // namespace
@@ -168,15 +189,15 @@ void Server::dispatch(const json& message) {
       return;
     }
     Encoding encoding;
+    std::string clangFormat;
     {
       std::lock_guard lock(settingsMutex_);
       encoding = context_.encoding;
+      clangFormat = clangFormatPath_;
     }
-    const json options = params.value("options", json::object());
-    FormatOptions formatOptions;
-    formatOptions.indentSize = options.value("tabSize", 4);
-    formatOptions.useTabs = !options.value("insertSpaces", true);
-    FormatResult result = formatShaderLab(analysis->text, formatOptions);
+    // The layout comes from the .clang-format that applies to the file, or from Unity's defaults, never from the
+    // editor's tabSize/insertSpaces: those would disagree with the code inside the HLSL blocks.
+    FormatResult result = formatShaderLab(analysis->text, resolveStyle(analysis->path, clangFormat));
     if (!result.ok) {
       respondError(id, kRequestFailed, "shaderlab-ls can't format this file: " + result.error);
       return;
@@ -241,10 +262,12 @@ json Server::initialize(const json& params) {
     applySettings(params["initializationOptions"]);
   }
 
-  const Fxc& fxc = Fxc::instance();
-  if (!fxc.available()) {
-    notify("window/logMessage", {{"type", 2}, {"message", fxc.loadError()}});
+  CheckOptions options;
+  {
+    std::lock_guard lock(settingsMutex_);
+    options = checkOptions_;
   }
+  if (options.compiler != CompilerChoice::None) notify("window/logMessage", compilerLog(options));
 
   return {
       {"capabilities",
@@ -263,9 +286,11 @@ json Server::initialize(const json& params) {
 
 // {
 //   "unityEditorPath": "C:/Program Files/Unity/Hub/Editor/6000.6.0f1/Editor",
+//   "clangFormatPath": "C:/Program Files/LLVM/bin/clang-format.exe",
+//   "dxcPath": "/opt/dxc/lib/libdxcompiler.so",
 //   "keywords": ["_NORMALMAP"],
 //   "defines": ["MY_DEFINE", "OTHER=2"],
-//   "diagnostics": { "fxc": true, "delay": 400 }
+//   "diagnostics": { "compiler": "auto", "delay": 400 }
 // }
 void Server::applySettings(const json& settings) {
   std::lock_guard lock(settingsMutex_);
@@ -273,6 +298,13 @@ void Server::applySettings(const json& settings) {
     std::string path = settings["unityEditorPath"].get<std::string>();
     context_.editorOverride = std::filesystem::path(std::u8string(path.begin(), path.end()));
     checkOptions_.editorOverride = context_.editorOverride;
+  }
+  if (settings.contains("clangFormatPath") && settings["clangFormatPath"].is_string()) {
+    clangFormatPath_ = settings["clangFormatPath"].get<std::string>();
+  }
+  if (settings.contains("dxcPath") && settings["dxcPath"].is_string()) {
+    std::string path = settings["dxcPath"].get<std::string>();
+    checkOptions_.dxcLibrary = std::filesystem::path(std::u8string(path.begin(), path.end()));
   }
   if (settings.contains("keywords") && settings["keywords"].is_array()) {
     checkOptions_.keywords.clear();
@@ -286,13 +318,21 @@ void Server::applySettings(const json& settings) {
       if (!define.is_string()) continue;
       std::string text = define.get<std::string>();
       size_t equals = text.find('=');
-      checkOptions_.defines.push_back(equals == std::string::npos ? FxcDefine{text, "1"}
-                                                                  : FxcDefine{text.substr(0, equals), text.substr(equals + 1)});
+      checkOptions_.defines.push_back(equals == std::string::npos ? ShaderDefine{text, "1"}
+                                                                  : ShaderDefine{text.substr(0, equals), text.substr(equals + 1)});
     }
   }
   if (settings.contains("diagnostics") && settings["diagnostics"].is_object()) {
     const json& diagnostics = settings["diagnostics"];
-    fxcEnabled_ = diagnostics.value("fxc", fxcEnabled_);
+    if (diagnostics.contains("compiler") && diagnostics["compiler"].is_string()) {
+      std::string choice = diagnostics["compiler"].get<std::string>();
+      checkOptions_.compiler = choice == "fxc"    ? CompilerChoice::Fxc
+                               : choice == "dxc"  ? CompilerChoice::Dxc
+                               : choice == "none" ? CompilerChoice::None
+                                                  : CompilerChoice::Auto;
+    }
+    // The switch this setting replaced.
+    if (diagnostics.contains("fxc") && diagnostics["fxc"] == false) checkOptions_.compiler = CompilerChoice::None;
     debounce_ = std::chrono::milliseconds(diagnostics.value("delay", static_cast<int>(debounce_.count())));
   }
 }
@@ -329,16 +369,18 @@ void Server::publish(const std::string& uri) {
     const Analysis& analysis = *it->second.analysis;
     version = it->second.version;
     for (const Diagnostic& diagnostic : analysis.diagnostics) diagnostics.push_back(diagnosticJson(analysis, diagnostic, encoding));
-    for (const Diagnostic& diagnostic : it->second.fxc) diagnostics.push_back(diagnosticJson(analysis, diagnostic, encoding));
+    for (const Diagnostic& diagnostic : it->second.hlsl) diagnostics.push_back(diagnosticJson(analysis, diagnostic, encoding));
   }
   notify("textDocument/publishDiagnostics", {{"uri", uri}, {"version", version}, {"diagnostics", std::move(diagnostics)}});
 }
 
 void Server::schedule(const std::string& uri, std::chrono::milliseconds delay) {
+  CheckOptions options;
   {
     std::lock_guard lock(settingsMutex_);
-    if (!fxcEnabled_ || !Fxc::instance().available()) return;
+    options = checkOptions_;
   }
+  if (!canCompileHlsl(uriToPath(uri), options)) return;
   {
     std::lock_guard lock(workerMutex_);
     pending_[uri] = std::chrono::steady_clock::now() + delay;
@@ -396,7 +438,7 @@ void Server::runCheck(const std::string& uri) {
     std::lock_guard lock(documentsMutex_);
     auto it = documents_.find(uri);
     if (it == documents_.end() || it->second.analysis != analysis || it->second.version != version) return;
-    it->second.fxc = std::move(diagnostics);
+    it->second.hlsl = std::move(diagnostics);
   }
   publish(uri);
 }

@@ -42,6 +42,14 @@ Shader "Tests/Format" {
       ENDHLSL
 
     }
+    Pass {
+      GLSLPROGRAM
+      #ifdef VERTEX
+        varying highp vec2 uv;
+        void main() { gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex; }
+      #endif
+      ENDGLSL
+    }
   }
   Fallback Off
 }

@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 
 #include "common/util.h"
+#include "compiler/dxc.h"
 
 namespace fs = std::filesystem;
 
@@ -64,21 +65,44 @@ std::vector<int> versionNumbers(std::string_view version) {
 }
 
 std::string env(const char* name) {
+#ifdef _MSC_VER
   size_t size = 0;
   char* value = nullptr;
   if (_dupenv_s(&value, &size, name) != 0 || !value) return {};
   std::string result(value);
   std::free(value);
   return result;
+#else
+  const char* value = std::getenv(name);
+  return value ? std::string(value) : std::string();
+#endif
+}
+
+// The folder Unity Hub keeps its configuration in.
+fs::path hubConfigFolder() {
+#ifdef _WIN32
+  std::string appData = env("APPDATA");
+  return appData.empty() ? fs::path() : fs::path(appData) / "UnityHub";
+#else
+  std::string config = env("XDG_CONFIG_HOME");
+  if (!config.empty()) return fs::path(config) / "UnityHub";
+  std::string home = env("HOME");
+  return home.empty() ? fs::path() : fs::path(home) / ".config" / "UnityHub";
+#endif
 }
 
 std::vector<fs::path> hubEditorRoots() {
   std::vector<fs::path> roots;
+#ifdef _WIN32
   std::string programFiles = env("ProgramFiles");
   if (!programFiles.empty()) roots.push_back(fs::path(programFiles) / "Unity" / "Hub" / "Editor");
-  std::string appData = env("APPDATA");
-  if (!appData.empty()) {
-    if (auto text = readFile(fs::path(appData) / "UnityHub" / "secondaryInstallPath.json")) {
+#else
+  std::string home = env("HOME");
+  if (!home.empty()) roots.push_back(fs::path(home) / "Unity" / "Hub" / "Editor");
+#endif
+  fs::path hubConfig = hubConfigFolder();
+  if (!hubConfig.empty()) {
+    if (auto text = readFile(hubConfig / "secondaryInstallPath.json")) {
       try {
         auto json = nlohmann::json::parse(*text);
         if (json.is_string() && !json.get<std::string>().empty()) roots.push_back(fs::path(json.get<std::string>()));
@@ -91,7 +115,10 @@ std::vector<fs::path> hubEditorRoots() {
 
 fs::path dataFolderFor(const fs::path& path) {
   if (path.empty()) return {};
-  if (path.filename() == "Unity.exe") return path.parent_path() / "Data";
+  // The editor binary: Unity.exe on Windows, Unity elsewhere. A folder of that name is an install root instead.
+  if (path.filename() == "Unity.exe" || (path.filename() == "Unity" && !isDirectory(path))) {
+    return path.parent_path() / "Data";
+  }
   if (isDirectory(path / "Editor" / "Data")) return path / "Editor" / "Data";
   if (isDirectory(path / "Data")) return path / "Data";
   return isDirectory(path) ? path : fs::path();
@@ -170,6 +197,12 @@ fs::path UnityProject::builtinIncludes() const {
   if (isDirectory(editorData_ / "Resources" / "CGIncludes")) return editorData_ / "Resources" / "CGIncludes";
   if (isDirectory(editorData_ / "CGIncludes")) return editorData_ / "CGIncludes";
   return {};
+}
+
+fs::path UnityProject::dxcLibrary() const {
+  if (editorData_.empty()) return {};
+  fs::path library = editorData_ / "Tools" / std::string(dxcLibraryName());
+  return isFile(library) ? library : fs::path();
 }
 
 std::optional<fs::path> UnityProject::resolvePackage(const std::string& name) const {

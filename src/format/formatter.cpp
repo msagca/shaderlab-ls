@@ -1,6 +1,7 @@
 #include "format/formatter.h"
 
 #include <algorithm>
+#include <optional>
 #include <vector>
 
 #include "common/text.h"
@@ -34,6 +35,7 @@ class Formatter {
       : src_(source), options_(options), lines_(source), tokens_(lexShaderLab(source, true)) {
     tokens_.pop_back();  // End
     if (options_.indentSize < 1) options_.indentSize = 1;
+    if (options_.tabWidth < 1) options_.tabWidth = 1;
   }
 
   FormatResult run() {
@@ -44,7 +46,7 @@ class Formatter {
     for (size_t i = 0; i < tokens_.size(); ++i) i = emit(i);
     flush();
 
-    while (!out_.empty() && out_.back().empty()) out_.pop_back();
+    collapseEmptyLines();
     std::string newline = src_.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
     if (src_.substr(0, 3) == "\xEF\xBB\xBF") result.text = "\xEF\xBB\xBF";  // the lexer skips it; keep it
     for (const std::string& line : out_) {
@@ -141,11 +143,28 @@ class Formatter {
     current_.clear();
   }
 
+  // At most MaxEmptyLinesToKeep empty lines in a row, and none at the end of the file. Kept whatever the setting:
+  // lines inside a block comment, and a line whose '\' would otherwise make the next line part of a macro.
+  void collapseEmptyLines() {
+    std::vector<std::string> kept;
+    bool comment = false;
+    int empty = 0;
+    for (std::string& line : out_) {
+      bool continuation = !kept.empty() && !kept.back().empty() && kept.back().back() == '\\';
+      empty = line.empty() ? empty + 1 : 0;
+      if (empty > options_.maxEmptyLines && !comment && !continuation) continue;
+      comment = inBlockComment(line, comment);
+      kept.push_back(std::move(line));
+    }
+    while (!kept.empty() && kept.back().empty()) kept.pop_back();
+    out_ = std::move(kept);
+  }
+
   void indent(std::string& line, int level, int extraColumns = 0) const {
     if (options_.useTabs) {
       line.append(static_cast<size_t>(level), '\t');
-      line.append(static_cast<size_t>(extraColumns / options_.indentSize), '\t');
-      line.append(static_cast<size_t>(extraColumns % options_.indentSize), ' ');
+      line.append(static_cast<size_t>(extraColumns / options_.tabWidth), '\t');
+      line.append(static_cast<size_t>(extraColumns % options_.tabWidth), ' ');
     } else {
       line.append(static_cast<size_t>(level * options_.indentSize + extraColumns), ' ');
     }
@@ -162,15 +181,20 @@ class Formatter {
     bool lineStart = current_.empty();
     if (previous_ && inlineLevel_ == 0) {
       bool sourceNewline = lines_.lineOf(previous_->span.end) != lines_.lineOf(token.span.begin);
-      bool newLine = forceBreak_ || opensBlock || closesBlock || token.kind == Tok::CodeBlock ||
+      bool newLine = forceBreak_ || closesBlock || token.kind == Tok::CodeBlock ||
                      (token.kind == Tok::Comment ? sourceNewline : startsStatement(token) || sourceNewline);
+      // The '{' of a block goes where the style puts it, whatever the file did.
+      if (opensBlock) newLine = forceBreak_ || options_.bracesOnOwnLine;
       if (newLine && !current_.empty()) {
         flush();
         lineStart = true;
       }
-      if (lineStart && newlinesBetween(previous_->span.end, token.span.begin) >= 2 && !closesBlock && !afterOpen_ &&
-          !out_.empty() && !out_.back().empty()) {
-        out_.emplace_back();
+      // The empty lines the file had between two statements, as many of them as the style keeps. None right after
+      // a '{' or before a '}'.
+      if (lineStart && !closesBlock && !afterOpen_ && !out_.empty() && !out_.back().empty()) {
+        int blanks = std::min(static_cast<int>(newlinesBetween(previous_->span.end, token.span.begin)) - 1,
+                              options_.maxEmptyLines);
+        for (int blank = 0; blank < blanks; ++blank) out_.emplace_back();
       }
     }
     forceBreak_ = false;
@@ -218,7 +242,7 @@ class Formatter {
       if (c == ' ') {
         ++result;
       } else if (c == '\t') {
-        result += options_.indentSize - result % options_.indentSize;
+        result += options_.tabWidth - result % options_.tabWidth;
       } else {
         break;
       }
@@ -293,6 +317,39 @@ class Formatter {
     current_ += keyword;
     flush();
 
+    if (!emitFormattedCode(content)) emitCodeAsWritten(content);
+
+    indent(current_, depth());
+    current_ += src_.substr(token.endKeyword.begin, token.endKeyword.end - token.endKeyword.begin);
+    forceBreak_ = true;
+  }
+
+  // Lays the code out with clang-format, indented to the block. False when clang-format is not installed or
+  // refuses the code, in which case the block keeps the layout it was written with.
+  bool emitFormattedCode(std::string_view content) {
+    std::optional<std::string> formatted = options_.clangFormat.format(content);
+    if (!formatted) return false;
+    std::string_view text = *formatted;
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.remove_suffix(1);
+    for (size_t start = 0; start <= text.size();) {
+      size_t end = text.find('\n', start);
+      std::string_view line = rtrim(text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start));
+      if (line.empty()) {
+        out_.emplace_back();
+      } else {
+        std::string out;
+        indent(out, depth());
+        out += line;
+        out_.push_back(std::move(out));
+      }
+      if (end == std::string_view::npos) break;
+      start = end + 1;
+    }
+    return true;
+  }
+
+  // Keeps the code as it is, shifted so that its least indented line lines up with the keyword.
+  void emitCodeAsWritten(std::string_view content) {
     std::vector<std::string_view> codeLines;
     for (size_t start = 0;;) {
       size_t end = content.find('\n', start);
@@ -313,23 +370,10 @@ class Formatter {
       out_.push_back(std::move(text));
     }
 
-    auto width = [&](std::string_view line) {
-      int columns = 0;
-      for (char c : line) {
-        if (c == ' ') {
-          ++columns;
-        } else if (c == '\t') {
-          columns += options_.indentSize - columns % options_.indentSize;
-        } else {
-          break;
-        }
-      }
-      return columns;
-    };
     int minimum = -1;
     for (std::string_view line : codeLines) {
       if (trim(line).empty()) continue;
-      int w = width(line);
+      int w = columns(line);
       minimum = minimum < 0 ? w : std::min(minimum, w);
     }
     for (std::string_view line : codeLines) {
@@ -340,17 +384,13 @@ class Formatter {
         continue;
       }
       std::string text;
-      indent(text, depth(), width(line) - minimum);
+      indent(text, depth(), columns(line) - minimum);
       // Keep trailing whitespace after a backslash: trimming it would turn the line into a continuation.
       std::string_view rest = line.substr(line.find_first_not_of(" \t"));
       std::string_view trimmed = rtrim(rest);
       text += !trimmed.empty() && trimmed.back() == '\\' && trimmed.size() != rest.size() ? rest : trimmed;
       out_.push_back(std::move(text));
     }
-
-    indent(current_, depth());
-    current_ += src_.substr(token.endKeyword.begin, token.endKeyword.end - token.endKeyword.begin);
-    forceBreak_ = true;
   }
 
   struct Scope {

@@ -6,7 +6,6 @@ Shader "Tests/Format"
         [Header(A  group, of things)] [HDR] _Color ("Color", Color) = (1, 1, 1, 1)
         _MainTex ("Texture", 2D) = "white" {}
         _Cutoff ("Cutoff", Range(0, 1)) = 0.5 // trailing comment
-
         [Enum(One,1,SrcAlpha,5)] _Blend ("Blend", Float) = 1
     }
     CGINCLUDE
@@ -40,13 +39,27 @@ Shader "Tests/Format"
             #pragma fragment frag
             #define LONG_MACRO(x) \
                 (x * 2)
-
             float4 vert(float4 p : POSITION) : SV_POSITION
             {
                 return p;
             }
-            float4 frag() : SV_Target { return 1; }
+            float4 frag() : SV_Target
+            {
+                return 1;
+            }
             ENDHLSL
+        }
+        Pass
+        {
+            GLSLPROGRAM
+            #ifdef VERTEX
+            varying highp vec2 uv;
+            void main()
+            {
+                gl_Position = gl_ModelViewProjectionMatrix * gl_Vertex;
+            }
+            #endif
+            ENDGLSL
         }
     }
     Fallback Off

@@ -1,8 +1,11 @@
+#ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#else
+#include <csignal>
+#endif
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <iterator>
@@ -12,29 +15,42 @@
 #include "analysis/hlsl_check.h"
 #include "common/util.h"
 #include "format/formatter.h"
-#include "fxc/fxc.h"
 #include "lsp/server.h"
 #include "lsp/transport.h"
 
 namespace {
 
 void printUsage() {
-  std::printf("shaderlab-ls %s - ShaderLab/HLSL language server for Unity shaders (Windows, FXC)\n\n"
+  std::printf("shaderlab-ls %s - ShaderLab/HLSL language server for Unity shaders (FXC, DXC)\n\n"
               "Usage:\n"
               "  shaderlab-ls [--stdio]                  Run the language server over stdio.\n"
-              "  shaderlab-ls --check <file> [--editor <path>]\n"
+              "  shaderlab-ls --check <file> [--editor <path>] [--dxc <library>] [--compiler auto|fxc|dxc|none]\n"
               "                                          Print diagnostics for a .shader/.compute/.hlsl file.\n"
-              "  shaderlab-ls --format <file|-> [--indent <n>] [--tabs]\n"
-              "                                          Write a formatted .shader file to stdout (- reads stdin).\n"
+              "  shaderlab-ls --format <file|-> [--assume-filename <path>] [--clang-format <exe>]\n"
+              "                                          Write a formatted .shader file to stdout (- reads stdin;\n"
+              "                                          --assume-filename says which .clang-format applies to it).\n"
               "  shaderlab-ls --version\n",
               SHADERLAB_LS_VERSION);
 }
 
-int formatFile(const std::string& file, const sls::FormatOptions& options) {
+// Windows opens the standard streams in text mode, which would rewrite the newlines of a formatted file.
+void binaryStdout() {
+#ifdef _WIN32
   _setmode(_fileno(stdout), _O_BINARY);
+#endif
+}
+
+void binaryStdin() {
+#ifdef _WIN32
+  _setmode(_fileno(stdin), _O_BINARY);
+#endif
+}
+
+int formatFile(const std::string& file, const std::string& assumeFilename, const std::string& clangFormat) {
+  binaryStdout();
   std::string source;
   if (file == "-") {
-    _setmode(_fileno(stdin), _O_BINARY);
+    binaryStdin();
     source.assign(std::istreambuf_iterator<char>(std::cin), std::istreambuf_iterator<char>());
   } else {
     auto text = sls::readFile(std::filesystem::path(std::u8string(file.begin(), file.end())));
@@ -44,6 +60,9 @@ int formatFile(const std::string& file, const sls::FormatOptions& options) {
     }
     source = std::move(*text);
   }
+  const std::string& styleFor = file == "-" ? assumeFilename : file;
+  sls::FormatOptions options = sls::resolveStyle(std::filesystem::path(std::u8string(styleFor.begin(), styleFor.end())),
+                                                clangFormat);
   sls::FormatResult result = sls::formatShaderLab(source, options);
   if (!result.ok) {
     std::fprintf(stderr, "shaderlab-ls: can't format %s: %s\n", file == "-" ? "stdin" : file.c_str(), result.error.c_str());
@@ -63,7 +82,14 @@ const char* severityName(sls::Severity severity) {
   return "";
 }
 
-int check(const std::string& file, const std::string& editor) {
+sls::CompilerChoice compilerChoice(std::string_view name) {
+  if (name == "fxc") return sls::CompilerChoice::Fxc;
+  if (name == "dxc") return sls::CompilerChoice::Dxc;
+  if (name == "none") return sls::CompilerChoice::None;
+  return sls::CompilerChoice::Auto;
+}
+
+int check(const std::string& file, const std::string& editor, const std::string& dxc, const std::string& compiler) {
   std::filesystem::path path(std::u8string(file.begin(), file.end()));
   auto text = sls::readFile(path);
   if (!text) {
@@ -73,12 +99,14 @@ int check(const std::string& file, const std::string& editor) {
   auto analysis = sls::analyze(std::filesystem::absolute(path), std::move(*text));
   sls::CheckOptions options;
   options.editorOverride = std::filesystem::path(std::u8string(editor.begin(), editor.end()));
+  options.dxcLibrary = std::filesystem::path(std::u8string(dxc.begin(), dxc.end()));
+  options.compiler = compilerChoice(compiler);
   std::vector<sls::Diagnostic> diagnostics = analysis->diagnostics;
-  if (!sls::Fxc::instance().available()) {
-    std::fprintf(stderr, "%s\n", sls::Fxc::instance().loadError().c_str());
-  } else {
-    auto fxc = sls::checkHlsl(*analysis, options, [] { return false; });
-    diagnostics.insert(diagnostics.end(), fxc.begin(), fxc.end());
+  if (sls::canCompileHlsl(analysis->path, options)) {
+    auto compiled = sls::checkHlsl(*analysis, options, [] { return false; });
+    diagnostics.insert(diagnostics.end(), compiled.begin(), compiled.end());
+  } else if (options.compiler != sls::CompilerChoice::None) {
+    std::fprintf(stderr, "No HLSL compiler: FXC exists on Windows only, and no DXC was found (see --dxc).\n");
   }
   int errors = 0;
   for (const sls::Diagnostic& diagnostic : diagnostics) {
@@ -94,10 +122,17 @@ int check(const std::string& file, const std::string& editor) {
 }  // namespace
 
 int main(int argc, char** argv) {
+#ifndef _WIN32
+  // clang-format may exit before it has read all of its input; that must not take the server with it.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
   std::string checkFile;
   std::string formatPath;
   std::string editor;
-  sls::FormatOptions formatOptions;
+  std::string assumeFilename;
+  std::string clangFormat;
+  std::string dxc;
+  std::string compiler;
   for (int i = 1; i < argc; ++i) {
     if (std::strcmp(argv[i], "--version") == 0) {
       std::printf("shaderlab-ls %s\n", SHADERLAB_LS_VERSION);
@@ -113,18 +148,22 @@ int main(int argc, char** argv) {
       editor = argv[++i];
     } else if (std::strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
       formatPath = argv[++i];
-    } else if (std::strcmp(argv[i], "--indent") == 0 && i + 1 < argc) {
-      formatOptions.indentSize = std::atoi(argv[++i]);
-    } else if (std::strcmp(argv[i], "--tabs") == 0) {
-      formatOptions.useTabs = true;
+    } else if (std::strcmp(argv[i], "--assume-filename") == 0 && i + 1 < argc) {
+      assumeFilename = argv[++i];
+    } else if (std::strcmp(argv[i], "--clang-format") == 0 && i + 1 < argc) {
+      clangFormat = argv[++i];
+    } else if (std::strcmp(argv[i], "--dxc") == 0 && i + 1 < argc) {
+      dxc = argv[++i];
+    } else if (std::strcmp(argv[i], "--compiler") == 0 && i + 1 < argc) {
+      compiler = argv[++i];
     } else if (std::strcmp(argv[i], "--stdio") != 0) {
       std::fprintf(stderr, "Unknown argument: %s\n", argv[i]);
       printUsage();
       return 2;
     }
   }
-  if (!formatPath.empty()) return formatFile(formatPath, formatOptions);
-  if (!checkFile.empty()) return check(checkFile, editor);
+  if (!formatPath.empty()) return formatFile(formatPath, assumeFilename, clangFormat);
+  if (!checkFile.empty()) return check(checkFile, editor, dxc, compiler);
 
   sls::Transport transport;
   sls::Server server(transport);

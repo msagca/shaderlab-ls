@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # The runner context does not exist yet at this level; the matrix does.
+      EXE: ${{ github.workspace }}/build/shaderlab-ls${{ startsWith(matrix.os, 'windows') && '.exe' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Install tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build clang-format
+          # There is no FXC on Linux: HLSL compiles with DXC, installed the way a user would, on the library path.
+          mkdir -p "$RUNNER_TEMP/dxc"
+          curl -sfL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/linux_dxc_2026_05_26.x86_64.tar.gz \
+            | tar xz -C "$RUNNER_TEMP/dxc"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/dxc/lib" >> "$GITHUB_ENV"
+
+      - name: Install tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang-format -ErrorAction SilentlyContinue)) { choco install llvm -y --no-progress }
+          # FXC comes with Windows. The SDK's DXC stands in for a Unity editor's, so the #pragma use_dxc test runs too.
+          $dxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\dxcompiler.dll" |
+            Sort-Object FullName | Select-Object -Last 1
+          if ($dxc) { "SHADERLAB_LS_TEST_DXC=$($dxc.FullName)" >> $env:GITHUB_ENV }
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: build.cmd Release
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: sh build.sh Release
+
+      - name: Test
+        run: python tests/run_tests.py "$EXE"
+        shell: bash
+
+      - name: Fuzz
+        run: python tests/fuzz.py "$EXE" 50
+        shell: bash
+        env:
+          FUZZ_COMPILE: '1'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: shaderlab-ls-${{ runner.os }}
+          path: ${{ env.EXE }}

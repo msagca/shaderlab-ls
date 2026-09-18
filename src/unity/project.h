@@ -23,6 +23,8 @@ class UnityProject {
   // UNITY_VERSION macro value, e.g. 6000.6 -> 600060.
   int versionMacro() const { return versionMacro_; }
   std::filesystem::path builtinIncludes() const;
+  // The DXC library the editor ships, which Unity compiles `#pragma use_dxc` shaders with. Empty if there is none.
+  std::filesystem::path dxcLibrary() const;
 
   std::optional<std::filesystem::path> resolveInclude(std::string_view name,
                                                       const std::filesystem::path& includerDir) const;

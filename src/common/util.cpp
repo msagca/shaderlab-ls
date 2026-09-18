@@ -81,7 +81,8 @@ std::filesystem::path uriToPath(std::string_view uri) {
 
 std::string pathToUri(const std::filesystem::path& path) {
   std::string generic = displayPath(path);
-  std::string uri = "file:///";
+  // "C:/Users/..." needs the third slash; "/home/..." brings its own.
+  std::string uri = generic.empty() || generic.front() != '/' ? "file:///" : "file://";
   static const char* hex = "0123456789ABCDEF";
   for (unsigned char c : generic) {
     if (std::isalnum(c) || c == '/' || c == '-' || c == '_' || c == '.' || c == '~' || c == ':') {
@@ -103,6 +104,12 @@ std::string displayPath(const std::filesystem::path& path) {
   return std::string(generic.begin(), generic.end());
 }
 
-std::string pathKey(const std::filesystem::path& path) { return toLower(displayPath(path)); }
+std::string pathKey(const std::filesystem::path& path) {
+#ifdef _WIN32
+  return toLower(displayPath(path));  // file names differing only in case are the same file
+#else
+  return displayPath(path);
+#endif
+}
 
 }  // namespace sls

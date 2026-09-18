@@ -1,7 +1,7 @@
 """Robustness check: feeds truncated and mangled shaders to shaderlab-ls and queries features at random positions.
 
 Usage: python tests/fuzz.py path/to/shaderlab-ls.exe [iterations] [extra files...]
-Set FUZZ_FXC=1 to run FXC diagnostics concurrently. Fails if the server crashes, hangs, or returns an error.
+Set FUZZ_COMPILE=1 to compile HLSL (FXC or DXC) concurrently. Fails if the server crashes, hangs, or returns an error.
 """
 
 import os
@@ -41,7 +41,7 @@ def main():
     client = Client(exe)
     client.request("initialize", {"processId": None, "rootUri": None,
                                   "capabilities": {"general": {"positionEncodings": ["utf-16"]}},
-                                  "initializationOptions": {"diagnostics": {"fxc": os.environ.get("FUZZ_FXC") == "1", "delay": 0}}})
+                                  "initializationOptions": {"diagnostics": {"compiler": "auto" if os.environ.get("FUZZ_COMPILE") == "1" else "none", "delay": 0}}})
     client.notify("initialized", {})
     start = time.time()
     for path in files:

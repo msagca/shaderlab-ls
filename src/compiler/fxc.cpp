@@ -1,8 +1,10 @@
-#include "fxc/fxc.h"
+#include "compiler/fxc.h"
 
+#ifdef _WIN32
 #include <windows.h>
 
 #include <d3dcompiler.h>
+#endif
 
 #include <cstdlib>
 #include <set>
@@ -14,6 +16,8 @@ namespace fs = std::filesystem;
 
 namespace sls {
 
+#ifdef _WIN32
+
 namespace {
 
 using D3DCompileFn = HRESULT(WINAPI*)(LPCVOID, SIZE_T, LPCSTR, const D3D_SHADER_MACRO*, ID3DInclude*, LPCSTR, LPCSTR,
@@ -23,7 +27,7 @@ using D3DPreprocessFn =
 
 class IncludeHandler final : public ID3DInclude {
  public:
-  IncludeHandler(const FxcIncludeOpener& opener, fs::path mainDir) : opener_(opener), mainDir_(std::move(mainDir)) {}
+  IncludeHandler(const IncludeOpener& opener, fs::path mainDir) : opener_(opener), mainDir_(std::move(mainDir)) {}
 
   HRESULT STDMETHODCALLTYPE Open(D3D_INCLUDE_TYPE, LPCSTR fileName, LPCVOID parentData, LPCVOID* data,
                                  UINT* bytes) noexcept override {
@@ -64,7 +68,7 @@ class IncludeHandler final : public ID3DInclude {
     return S_OK;
   }
 
-  const FxcIncludeOpener& opener_;
+  const IncludeOpener& opener_;
   fs::path mainDir_;
   std::unordered_map<LPCVOID, fs::path> parents_;
   std::set<std::string> seen_;
@@ -80,8 +84,8 @@ std::string blobText(ID3DBlob* blob) {
 }
 
 struct Macros {
-  explicit Macros(const std::vector<FxcDefine>& defines) {
-    for (const FxcDefine& define : defines) list.push_back({define.name.c_str(), define.value.c_str()});
+  explicit Macros(const std::vector<ShaderDefine>& defines) {
+    for (const ShaderDefine& define : defines) list.push_back({define.name.c_str(), define.value.c_str()});
     list.push_back({nullptr, nullptr});
   }
   std::vector<D3D_SHADER_MACRO> list;
@@ -107,18 +111,18 @@ Fxc::Fxc() {
     preprocess_ = reinterpret_cast<void*>(GetProcAddress(module, "D3DPreprocess"));
     if (compile_ && preprocess_) {
       wchar_t path[MAX_PATH];
-      if (GetModuleFileNameW(module, path, MAX_PATH)) dllPath_ = displayPath(fs::path(path));
+      if (GetModuleFileNameW(module, path, MAX_PATH)) libraryPath_ = displayPath(fs::path(path));
       return;
     }
     compile_ = preprocess_ = nullptr;
   }
-  loadError_ = "d3dcompiler_47.dll (FXC) could not be loaded; HLSL diagnostics are disabled.";
+  loadError_ = "d3dcompiler_47.dll (FXC) could not be loaded.";
 }
 
-FxcResult Fxc::compile(const std::string& source, const std::string& sourceName, const fs::path& sourceDir,
-                       const std::vector<FxcDefine>& defines, const std::string& entry, const std::string& profile,
-                       const FxcIncludeOpener& opener) const {
-  FxcResult result;
+CompileResult Fxc::compile(const std::string& source, const std::string& sourceName, const fs::path& sourceDir,
+                       const std::vector<ShaderDefine>& defines, const std::string& entry, const std::string& profile,
+                       const IncludeOpener& opener) const {
+  CompileResult result;
   if (!compile_) return result;
   IncludeHandler include(opener, sourceDir);
   Macros macros(defines);
@@ -135,9 +139,9 @@ FxcResult Fxc::compile(const std::string& source, const std::string& sourceName,
   return result;
 }
 
-FxcResult Fxc::preprocess(const std::string& source, const std::string& sourceName, const fs::path& sourceDir,
-                          const std::vector<FxcDefine>& defines, const FxcIncludeOpener& opener) const {
-  FxcResult result;
+CompileResult Fxc::preprocess(const std::string& source, const std::string& sourceName, const fs::path& sourceDir,
+                          const std::vector<ShaderDefine>& defines, const IncludeOpener& opener) const {
+  CompileResult result;
   if (!preprocess_) return result;
   IncludeHandler include(opener, sourceDir);
   Macros macros(defines);
@@ -153,12 +157,39 @@ FxcResult Fxc::preprocess(const std::string& source, const std::string& sourceNa
   return result;
 }
 
+#else
+
+// FXC is d3dcompiler_47.dll, which exists on Windows only. Elsewhere HLSL is compiled with DXC, if at all; callers
+// ask available().
+Fxc& Fxc::instance() {
+  static Fxc fxc;
+  return fxc;
+}
+
+Fxc::Fxc() { loadError_ = "FXC (d3dcompiler_47.dll) exists on Windows only."; }
+
+CompileResult Fxc::compile(const std::string&, const std::string&, const fs::path&, const std::vector<ShaderDefine>&,
+                       const std::string&, const std::string&, const IncludeOpener&) const {
+  return {};
+}
+
+CompileResult Fxc::preprocess(const std::string&, const std::string&, const fs::path&, const std::vector<ShaderDefine>&,
+                          const IncludeOpener&) const {
+  return {};
+}
+
+#endif
+
+std::string Fxc::profile(std::string_view stage, int model) const {
+  return std::string(stage) + (model >= 50 ? "_5_0" : "_4_0");
+}
+
 // Lines look like:
 //   C:/path/file.shader(40,34-48): error X3004: undeclared identifier 'foo'
 //   file.hlsl(1,9): warning X3568: 'vertex' : unknown pragma ignored
 //   error X3501: 'Nope': entrypoint not found
-std::vector<FxcMessage> parseFxcMessages(std::string_view output) {
-  std::vector<FxcMessage> messages;
+std::vector<CompilerMessage> parseFxcMessages(std::string_view output) {
+  std::vector<CompilerMessage> messages;
   size_t start = 0;
   while (start < output.size()) {
     size_t end = output.find('\n', start);
@@ -168,7 +199,7 @@ std::vector<FxcMessage> parseFxcMessages(std::string_view output) {
     if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
     if (trim(line).empty()) continue;
 
-    FxcMessage message;
+    CompilerMessage message;
     std::string_view rest = line;
     size_t severityAt = std::string_view::npos;
     for (std::string_view marker : {": error ", ": warning "}) {
@@ -207,7 +238,7 @@ std::vector<FxcMessage> parseFxcMessages(std::string_view output) {
     message.text = std::string(rest);
     // FXC repeats the location and code on each continuation line of a multi-line message.
     if (!messages.empty()) {
-      FxcMessage& previous = messages.back();
+      CompilerMessage& previous = messages.back();
       if (previous.file == message.file && previous.line == message.line && previous.column == message.column &&
           previous.code == message.code && previous.warning == message.warning && !message.code.empty()) {
         previous.text += "\n" + message.text;

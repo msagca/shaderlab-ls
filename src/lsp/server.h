@@ -30,7 +30,7 @@ class Server {
   struct Document {
     int version = 0;
     std::shared_ptr<const Analysis> analysis;
-    std::vector<Diagnostic> fxc;
+    std::vector<Diagnostic> hlsl;  // from the last compile
   };
 
   void dispatch(const nlohmann::json& message);
@@ -55,7 +55,7 @@ class Server {
   std::mutex settingsMutex_;
   FeatureContext context_;
   CheckOptions checkOptions_;
-  bool fxcEnabled_ = true;
+  std::string clangFormatPath_;  // empty: clang-format from PATH
   std::chrono::milliseconds debounce_{400};
 
   std::mutex documentsMutex_;

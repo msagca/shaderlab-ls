@@ -1,7 +1,9 @@
 #include "lsp/transport.h"
 
+#ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -11,8 +13,11 @@
 namespace sls {
 
 Transport::Transport() {
+#ifdef _WIN32
+  // Elsewhere the streams are binary already.
   _setmode(_fileno(stdin), _O_BINARY);
   _setmode(_fileno(stdout), _O_BINARY);
+#endif
 }
 
 std::optional<std::string> Transport::read() {
