@@ -166,9 +166,14 @@ plugin manager announcing anything: `vim.pack.update()`, a bare `git pull` and a
 caught the same way. The build runs in the background and the server restarts itself when it finishes, so a shader
 opened while it is going picks the new executable up on its own.
 
-Building needs CMake, Ninja and a C++ compiler. Without them the build fails with the toolchain's own message; set
-`vim.g.shaderlab_ls_auto_build = false` to be warned that the executable is out of date instead, and build it
-yourself. Either way the config falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
+Building needs CMake, Ninja and a C++ compiler. Both streams of the build go to a log, which `:ShaderlabLsBuildLog`
+opens; a failure reports the exit code and the last lines of it, which is where ninja leaves the error. Set
+`vim.g.shaderlab_ls_auto_build = false` to be warned that the executable is out of date rather than have one built.
+Either way the config falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
+
+The server keeps running while its replacement builds. Neither Windows nor Linux lets a linker write over a
+running executable, so the old one is moved aside first and put back if the build fails: a build that cannot
+succeed leaves exactly what was there before, and the server restarts onto the new executable when one lands.
 
 To build at update time instead of when the first shader is opened, front-load it with a `PackChanged` hook — the
 config then finds the executable already current and does nothing:

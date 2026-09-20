@@ -27,21 +27,112 @@ local function newest_source()
 end
 
 -- Set vim.g.shaderlab_ls_auto_build = false to be told about a stale executable rather than have one built.
-local attempted = false
+-- Restarting the server re-reads this file, so anything tracked in a file-local is reset by the very restart a
+-- finished build performs. That turns "build at most once" into a build every restart, and a build that cannot
+-- succeed into a loop of them. The state that must outlive a reload therefore lives past it.
+local state = _G.__shaderlab_ls or {}
+_G.__shaderlab_ls = state
+local log = vim.fs.joinpath(vim.fn.stdpath 'log', 'shaderlab-ls-build.log')
+
+vim.api.nvim_create_user_command('ShaderlabLsBuildLog', function()
+  if not vim.uv.fs_stat(log) then
+    vim.notify('shaderlab-ls: no build has been run in this profile yet', vim.log.levels.WARN)
+    return
+  end
+  vim.cmd('tabedit ' .. vim.fn.fnameescape(log))
+  vim.bo.modifiable = false
+end, { desc = 'Open the last shaderlab-ls build log' })
+
+-- Both streams, always, and kept on disk. cmake, ninja and the compilers write most of what went wrong to stdout,
+-- so reporting result.stderr alone reported almost nothing: a failed build looked like a silent one.
+local function report(result)
+  local lines = {}
+  for _, line in ipairs(vim.split((result.stdout or '') .. (result.stderr or ''), '\n')) do
+    lines[#lines + 1] = (line:gsub('\r$', ''))
+  end
+  pcall(vim.fn.mkdir, vim.fs.dirname(log), 'p')
+  pcall(vim.fn.writefile, lines, log)
+  if result.code == 0 then
+    vim.notify 'shaderlab-ls built'
+    return
+  end
+  -- Ninja stops at the first failure and prints it last, so the end of the output is the error itself.
+  local tail = {}
+  for i = #lines, 1, -1 do
+    if lines[i]:match '%S' then
+      table.insert(tail, 1, lines[i])
+      if #tail >= 20 then break end
+    end
+  end
+  -- The one failure worth naming: something else still has the executable open, so no build can replace it.
+  local held = vim.iter(lines):any(function(line) return line:find('LNK1104', 1, true) ~= nil end)
+  vim.notify(
+    ('shaderlab-ls build failed (exit %d). Full log: %s (:ShaderlabLsBuildLog)%s\n%s'):format(
+      result.code,
+      log,
+      held and '\nAnother process is holding the executable; close other editors running this server.' or '',
+      table.concat(tail, '\n')
+    ),
+    vim.log.levels.ERROR
+  )
+end
+
+-- Images left behind by a build, newest first. A session that ended mid-build leaves one of these and no `built`,
+-- and it is then the only executable there is, so it is found rather than swept.
+local function moved_images()
+  local directory = vim.fs.dirname(built)
+  local found = {}
+  if vim.uv.fs_stat(directory) then
+    for entry in vim.fs.dir(directory) do
+      if entry:match '^shaderlab%-ls%.old%-' then found[#found + 1] = vim.fs.joinpath(directory, entry) end
+    end
+  end
+  table.sort(found, function(a, b) return (mtime(a) or 0) > (mtime(b) or 0) end)
+  return found
+end
+
+-- A running server holds its own image open, and the linker cannot write over it: Windows fails the link outright
+-- with LNK1104, Linux with ETXTBSY. Both allow the file to be *renamed* while it runs, which frees the name for
+-- the linker and leaves the running process on the old image until it exits. Stopping the client first is not a
+-- substitute: the client list empties before the process does, and an incremental build links seconds later.
+local function move_aside()
+  if not vim.uv.fs_stat(built) then return end
+  local moved = (built:gsub('%.exe$', '')) .. '.old-' .. tostring(vim.uv.hrtime()):sub(-6) .. (windows and '.exe' or '')
+  if pcall(vim.uv.fs_rename, built, moved) then state.aside = moved end
+end
+
+-- A build that fails must leave what was working exactly where it was. Moving the old executable out of the way is
+-- otherwise a way to destroy it: nothing at `built`, nothing on PATH, and a merely stale server has become no
+-- server at all. Nothing is deleted until a build has succeeded, for the same reason.
+local function restore_aside()
+  if state.aside and not vim.uv.fs_stat(built) then pcall(vim.uv.fs_rename, state.aside, built) end
+  state.aside = nil
+end
+
+local function discard_aside()
+  state.aside = nil
+  for _, path in ipairs(moved_images()) do pcall(vim.uv.fs_unlink, path) end
+end
 
 local function build()
-  attempted = true  -- at most one build a session, so a build that cannot fix the staleness cannot loop either
-  local cmd = windows and { 'cmd.exe', '/c', 'build.cmd' } or { 'sh', 'build.sh' }
-  vim.notify 'shaderlab-ls: building'
-  vim.system(cmd, { cwd = root, text = true }, function(result)
-    vim.schedule(function()
-      if result.code ~= 0 then
-        vim.notify('shaderlab-ls build failed:\n' .. (result.stderr or ''), vim.log.levels.ERROR)
-        return
-      end
-      vim.notify 'shaderlab-ls built'
-      vim.lsp.enable(name, false)  -- pick the new executable up in the buffers that are already open
-      vim.lsp.enable(name)
+  state.attempted = true  -- at most one build a session, so a build that cannot fix the staleness cannot loop either
+  -- By full path: both scripts locate the repository from their own, and cmd.exe does not look in the working
+  -- directory for a script when NoDefaultCurrentDirectoryInExePath is set.
+  local script = vim.fs.joinpath(root, windows and 'build.cmd' or 'build.sh')
+  local cmd = windows and { 'cmd.exe', '/c', script } or { 'sh', script }
+  -- Scheduled, so the client this build was resolved for has spawned before the executable moves underneath it.
+  vim.schedule(function()
+    move_aside()
+    vim.notify('shaderlab-ls: building in ' .. root)
+    vim.system(cmd, { cwd = root, text = true }, function(result)
+      vim.schedule(function()
+        if result.code == 0 then discard_aside() else restore_aside() end
+        report(result)
+        -- Restart onto what was just linked. The server ran from the moved image throughout, so the only gap is
+        -- here, rather than for the length of a build.
+        vim.lsp.enable(name, false)
+        vim.lsp.enable(name)
+      end)
     end)
   end)
 end
@@ -50,20 +141,24 @@ local function resolve()
   if not vim.uv.fs_stat(sources) then return 'shaderlab-ls' end  -- a copy of this file alone, not the repository
   local have = mtime(built)
   if have and have >= newest_source() then return built end
-  if not attempted then
+  if not state.attempted then
     if vim.g.shaderlab_ls_auto_build == false then
       vim.notify(
         ('shaderlab-ls: %s in %s'):format(
           have and 'the executable is out of date; rebuild it' or 'nothing is built yet; build it', root),
         vim.log.levels.WARN
       )
-      attempted = true
+      state.attempted = true
     else
       build()
     end
   end
-  -- Until the build lands, serve the stale executable rather than nothing; with none, fall back to PATH.
-  return have and built or 'shaderlab-ls'
+  -- Until the build lands, serve the stale executable rather than nothing: the one at `built`, or the newest image
+  -- a build moved out of the way, whether this session's or one left by a session that ended mid-build. Failing
+  -- both, a shaderlab-ls on PATH.
+  if have then return built end
+  local moved = moved_images()[1]
+  return moved or 'shaderlab-ls'
 end
 
 ---@type vim.lsp.Config
