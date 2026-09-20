@@ -208,7 +208,7 @@ vim.lsp.enable 'shaderlab_ls'
 require('conform').setup {
   formatters = {
     shaderlab_ls = {
-      command = function() return vim.lsp.config.shaderlab_ls.cmd[1] end,  -- the exe the LSP config found
+      command = function() return vim.lsp.config.shaderlab_ls.executable() end,  -- the exe the LSP config found
       -- The layout comes from the .clang-format that applies to the file, so tell it where the buffer lives.
       args = function(_, ctx) return { '--format', '-', '--assume-filename', ctx.filename } end,
     },
@@ -219,6 +219,10 @@ require('conform').setup {
 
 The other way round works too: leave the filetypes out of `formatters_by_ft` and pass `lsp_format = 'fallback'` to
 format through the running server. The output is the same either way — same code, same `.clang-format`.
+
+`executable()` rather than `cmd[1]`: `cmd` is a function, so that the executable is resolved when the server
+starts instead of once when this config is read. `executable()` resolves the same way, building the repository
+first if the executable is behind, and is the supported way to get the path for anything that runs it directly.
 
 ## How HLSL is checked
 

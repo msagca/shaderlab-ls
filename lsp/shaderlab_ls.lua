@@ -78,6 +78,10 @@ return {
       detached = config.detached,
     })
   end,
+  -- Not part of vim.lsp.Config, and the reason cmd being a function costs nothing: whatever wants to run the
+  -- executable itself rather than talk to the server (conform.nvim's `command`, a keymap, :!) asks for it here.
+  -- It resolves exactly as the server does, so it builds the repository too when the executable is behind.
+  executable = resolve,
   -- GLSL is formatted but never analyzed, here as in a GLSLPROGRAM block; pair it with glsl_analyzer for the rest.
   filetypes = { 'shaderlab', 'hlsl', 'glsl' },
   root_markers = { 'ProjectSettings', 'Assets', '.git' },
