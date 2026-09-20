@@ -14,6 +14,8 @@ DocumentKind documentKindFor(const fs::path &path) {
     return DocumentKind::ShaderLab;
   if (extension == ".compute")
     return DocumentKind::Compute;
+  if (extension == ".glsl" || extension == ".glslinc")
+    return DocumentKind::Glsl;
   return DocumentKind::HlslInclude;
 }
 std::optional<size_t> Analysis::unitAt(size_t offset) const {
@@ -29,6 +31,13 @@ bool Analysis::isProgram(size_t unit) const {
   if (kind != DocumentKind::ShaderLab || units[unit].block < 0)
     return false;
   return isProgramBlock(shader.blocks[units[unit].block].kind);
+}
+bool Analysis::isGlsl(size_t unit) const {
+  if (kind == DocumentKind::Glsl)
+    return true;
+  if (kind != DocumentKind::ShaderLab || units[unit].block < 0)
+    return false;
+  return shader.blocks[units[unit].block].kind == BlockKind::GlslProgram;
 }
 std::vector<size_t> Analysis::visibleUnits(size_t unit) const {
   if (kind != DocumentKind::ShaderLab || units[unit].block < 0)
@@ -150,11 +159,13 @@ std::shared_ptr<const Analysis> analyze(fs::path path, std::string text) {
   } else {
     HlslUnit unit;
     unit.range = {0, analysis->text.size()};
-    unit.scan = scanHlsl(analysis->text, unit.range);
+    // A GLSL document is one unit so that positions inside it resolve, but nothing reads it as HLSL.
+    if (analysis->kind != DocumentKind::Glsl)
+      unit.scan = scanHlsl(analysis->text, unit.range);
     analysis->units.push_back(std::move(unit));
   }
   for (size_t i = 0; i < analysis->units.size(); ++i) {
-    if (analysis->kind == DocumentKind::ShaderLab && analysis->shader.blocks[analysis->units[i].block].kind == BlockKind::GlslProgram)
+    if (analysis->isGlsl(i))
       continue;
     validatePragmas(*analysis, i);
     if (analysis->kind == DocumentKind::ShaderLab && analysis->isProgram(i))

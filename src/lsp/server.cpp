@@ -176,7 +176,7 @@ void Server::dispatch(const json &message) {
   }
   if (method == "textDocument/formatting") {
     auto analysis = snapshot(params.at("textDocument").at("uri").get<std::string>());
-    if (!analysis || analysis->kind != DocumentKind::ShaderLab) {
+    if (!analysis) {
       respond(id, nullptr);
       return;
     }
@@ -189,7 +189,9 @@ void Server::dispatch(const json &message) {
     }
     // The layout comes from the .clang-format that applies to the file, or from Unity's defaults, never from the
     // editor's tabSize/insertSpaces: those would disagree with the code inside the HLSL blocks.
-    FormatResult result = formatShaderLab(analysis->text, resolveStyle(analysis->path, clangFormat));
+    FormatOptions options = resolveStyle(analysis->path, clangFormat);
+    FormatResult result = analysis->kind == DocumentKind::ShaderLab ? formatShaderLab(analysis->text, options)
+                                                                    : formatCode(analysis->text, options);
     if (!result.ok) {
       respondError(id, kRequestFailed, "shaderlab-ls can't format this file: " + result.error);
       return;

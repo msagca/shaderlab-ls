@@ -1,10 +1,11 @@
--- Filetypes, set when this repository is on 'runtimepath'. Neovim knows none of these extensions: it has no
--- shaderlab filetype of its own, does not detect *.hlsl, and gives *.shader to Godot's gdshader. A
--- vim.filetype.add() call of your own still wins over this one.
+-- Filetypes, set when this repository is on 'runtimepath'. Neovim knows almost none of these extensions: it has no
+-- shaderlab filetype of its own, does not detect *.hlsl or *.glslinc, and gives *.shader to Godot's gdshader. Only
+-- *.glsl it already maps to glsl. A vim.filetype.add() call of your own still wins over this one.
 vim.filetype.add {
   extension = {
     cginc = 'hlsl',
     compute = 'hlsl',
+    glslinc = 'glsl',
     hlsl = 'hlsl',
     hlslinc = 'hlsl',
     shader = function(_, buffer)

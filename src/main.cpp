@@ -24,8 +24,9 @@ void printUsage() {
     "  shaderlab-ls --check <file> [--editor <path>] [--dxc <library>] [--compiler auto|fxc|dxc|none]\n"
     "                                          Print diagnostics for a .shader/.compute/.hlsl file.\n"
     "  shaderlab-ls --format <file|-> [--assume-filename <path>] [--clang-format <exe>]\n"
-    "                                          Write a formatted .shader file to stdout (- reads stdin;\n"
-    "                                          --assume-filename says which .clang-format applies to it).\n"
+    "                                          Write a formatted .shader/.compute/.hlsl/.glsl file to stdout\n"
+    "                                          (- reads stdin; --assume-filename says which .clang-format\n"
+    "                                          applies to it).\n"
     "  shaderlab-ls --version\n",
     SHADERLAB_LS_VERSION);
 }
@@ -55,9 +56,12 @@ int formatFile(const std::string &file, const std::string &assumeFilename, const
     source = std::move(*text);
   }
   const std::string &styleFor = file == "-" ? assumeFilename : file;
-  sls::FormatOptions options = sls::resolveStyle(std::filesystem::path(std::u8string(styleFor.begin(), styleFor.end())),
-    clangFormat);
-  sls::FormatResult result = sls::formatShaderLab(source, options);
+  std::filesystem::path stylePath(std::u8string(styleFor.begin(), styleFor.end()));
+  sls::FormatOptions options = sls::resolveStyle(stylePath, clangFormat);
+  // Text with no name of its own - stdin without --assume-filename - is taken for ShaderLab.
+  sls::DocumentKind kind = styleFor.empty() ? sls::DocumentKind::ShaderLab : sls::documentKindFor(stylePath);
+  sls::FormatResult result = kind == sls::DocumentKind::ShaderLab ? sls::formatShaderLab(source, options)
+                                                                  : sls::formatCode(source, options);
   if (!result.ok) {
     std::fprintf(stderr, "shaderlab-ls: can't format %s: %s\n", file == "-" ? "stdin" : file.c_str(), result.error.c_str());
     return 1;

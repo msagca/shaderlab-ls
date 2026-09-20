@@ -12,7 +12,8 @@ local exe = vim.uv.fs_stat(built) and built or 'shaderlab-ls'
 ---@type vim.lsp.Config
 return {
   cmd = { exe, '--stdio' },
-  filetypes = { 'shaderlab', 'hlsl' },
+  -- GLSL is formatted but never analyzed, here as in a GLSLPROGRAM block; pair it with glsl_analyzer for the rest.
+  filetypes = { 'shaderlab', 'hlsl', 'glsl' },
   root_markers = { 'ProjectSettings', 'Assets', '.git' },
   init_options = {
     -- unityEditorPath = 'C:/Program Files/Unity/Hub/Editor/6000.6.0f1/Editor',

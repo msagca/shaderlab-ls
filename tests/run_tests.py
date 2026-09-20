@@ -223,8 +223,16 @@ def main():
     # Fixtures may be checked out with CRLF; the formatter keeps whatever it is given, so test with LF explicitly.
     source = (FIXTURES / "format_input.shader").read_bytes().replace(b"\r\n", b"\n")
     expected = (FIXTURES / "format_expected.shader").read_bytes().replace(b"\r\n", b"\n")
-    # The fixtures folder has no .clang-format, so this is Unity's default layout.
-    where = ["--assume-filename", str(FIXTURES / "format_input.shader")]
+    # Unity's default layout is used only when no .clang-format is found from the file up to the root. The checks
+    # that expect it therefore name a path in an empty temp folder rather than tests/fixtures, which a
+    # .clang-format put anywhere in this repository - or above it - would reach.
+    unstyled_dir = tempfile.TemporaryDirectory()
+    unstyled = pathlib.Path(unstyled_dir.name)
+    above = next((d for d in [unstyled, *unstyled.parents]
+                  if (d / ".clang-format").exists() or (d / "_clang-format").exists()), None)
+    check(above is None, "nothing above the temp folder configures clang-format"
+          + (f", but {above} does: the default-layout checks below cannot hold" if above else ""))
+    where = ["--assume-filename", str(unstyled / "format_input.shader")]
     run = subprocess.run([exe, "--format", "-"] + where, input=source, capture_output=True)
     check(run.returncode == 0 and run.stdout == expected, "output matches format_expected.shader")
     again = subprocess.run([exe, "--format", "-"] + where, input=expected, capture_output=True)
@@ -255,13 +263,67 @@ def main():
     broken = subprocess.run([exe, "--format", str(FIXTURES / "syntax.shader")], capture_output=True)
     check(broken.returncode == 1 and broken.stdout == b"" and b"missing '}'" in broken.stderr, "unbalanced files are refused")
 
-    format_uri = uri_for(FIXTURES / "format_input.shader")
+    # .compute, .hlsl and .cginc files are HLSL from end to end: all of the file goes to clang-format, with the same
+    # two HLSL fixes the code blocks of a .shader get - entry point attributes keep their own line and includes keep
+    # their order. The fixtures folder has no .clang-format, so this is Unity's layout again.
+    hlsl = (b'#pragma kernel CSMain\n#include "b.hlsl"\n#include "a.hlsl"\n\n\n'
+            b'RWStructuredBuffer<float>  _Values;\n\n'
+            b'[numthreads(8, 1, 1)]\nvoid CSMain(uint3 id : SV_DispatchThreadID)\n{\n  _Values[ id.x ] = 1;\n}\n')
+    hlsl_expected = (b'#pragma kernel CSMain\n#include "b.hlsl"\n#include "a.hlsl"\n'
+                     b'RWStructuredBuffer<float> _Values;\n'
+                     b'[numthreads(8, 1, 1)]\nvoid CSMain(uint3 id : SV_DispatchThreadID)\n{\n    _Values[id.x] = 1;\n}\n')
+    for extension in (".compute", ".hlsl", ".cginc"):
+        hlsl_where = ["--assume-filename", str(unstyled / ("unsaved" + extension))]
+        run = subprocess.run([exe, "--format", "-"] + hlsl_where, input=hlsl, capture_output=True)
+        check(run.returncode == 0 and run.stdout == hlsl_expected, f"a {extension} file is laid out by clang-format")
+        again = subprocess.run([exe, "--format", "-"] + hlsl_where, input=run.stdout, capture_output=True)
+        check(again.stdout == hlsl_expected, f"formatting a {extension} file is idempotent")
+
+    hlsl_where = ["--assume-filename", str(unstyled / "unsaved.compute")]
+    crlf = subprocess.run([exe, "--format", "-"] + hlsl_where, input=hlsl.replace(b"\n", b"\r\n"), capture_output=True)
+    check(crlf.stdout == hlsl_expected.replace(b"\n", b"\r\n"), "an HLSL file keeps its CRLF line endings")
+    bom = subprocess.run([exe, "--format", "-"] + hlsl_where, input=b"\xef\xbb\xbf" + hlsl, capture_output=True)
+    check(bom.stdout == b"\xef\xbb\xbf" + hlsl_expected, "an HLSL file keeps its UTF-8 BOM")
+    without = subprocess.run([exe, "--format", "-", "--clang-format", "no-such-clang-format"] + hlsl_where,
+                             input=hlsl, capture_output=True)
+    check(without.returncode == 1 and without.stdout == b"" and b"clang-format" in without.stderr,
+          "an HLSL file is left alone when clang-format cannot be run")
+
+    # GLSL files are laid out the same way - clang-format reads them as C++, which they are close enough to - but
+    # they are never analyzed, here as in a GLSLPROGRAM block.
+    glsl = (b'#version 300 es\nlayout(location = 0) in  vec3 aPos;\n\n\n'
+            b'void main()\n{\n  gl_Position = vec4( aPos, 1.0 );\n}\n')
+    glsl_expected = (b'#version 300 es\nlayout(location = 0) in vec3 aPos;\n'
+                     b'void main()\n{\n    gl_Position = vec4(aPos, 1.0);\n}\n')
+    for extension in (".glsl", ".glslinc"):
+        run = subprocess.run([exe, "--format", "-", "--assume-filename", str(unstyled / ("unsaved" + extension))],
+                             input=glsl, capture_output=True)
+        check(run.returncode == 0 and run.stdout == glsl_expected, f"a {extension} file is laid out by clang-format")
+
+    format_uri = uri_for(unstyled / "format_input.shader")
     client.notify("textDocument/didOpen", {"textDocument": {"uri": format_uri, "languageId": "shaderlab", "version": 1, "text": source.decode("utf-8")}})
     diags(client, format_uri)
     edits = client.request("textDocument/formatting", {"textDocument": {"uri": format_uri}, "options": {"tabSize": 4, "insertSpaces": True}})
     lines = source.decode("utf-8").split("\n")
     check(len(edits) == 1 and edits[0]["newText"] == expected.decode("utf-8")
           and edits[0]["range"]["end"]["line"] == len(lines) - 1, "LSP formatting returns the whole formatted document")
+    hlsl_uri = uri_for(unstyled / "unsaved_kernel.compute")
+    client.notify("textDocument/didOpen",
+                  {"textDocument": {"uri": hlsl_uri, "languageId": "hlsl", "version": 1, "text": hlsl.decode("utf-8")}})
+    diags(client, hlsl_uri)
+    edits = client.request("textDocument/formatting", {"textDocument": {"uri": hlsl_uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    check(len(edits) == 1 and edits[0]["newText"] == hlsl_expected.decode("utf-8"),
+          "LSP formatting lays out HLSL documents as well")
+    glsl_uri = uri_for(unstyled / "unsaved.glsl")
+    client.notify("textDocument/didOpen",
+                  {"textDocument": {"uri": glsl_uri, "languageId": "glsl", "version": 1, "text": glsl.decode("utf-8")}})
+    check(diags(client, glsl_uri) == [], "GLSL documents are never analyzed")
+    edits = client.request("textDocument/formatting", {"textDocument": {"uri": glsl_uri}, "options": {"tabSize": 4, "insertSpaces": True}})
+    check(len(edits) == 1 and edits[0]["newText"] == glsl_expected.decode("utf-8"),
+          "LSP formatting lays out GLSL documents")
+    where_gl = {"textDocument": {"uri": glsl_uri}, "position": {"line": 6, "character": 10}}
+    check(labels(client.request("textDocument/completion", where_gl)) == set(), "no HLSL completion in a GLSL file")
+    check(client.request("textDocument/hover", where_gl) is None, "no HLSL hover in a GLSL file")
     broken_uri = uri_for(FIXTURES / "unsaved_broken.shader")
     client.notify("textDocument/didOpen", {"textDocument": {"uri": broken_uri, "languageId": "shaderlab", "version": 1, "text": 'Shader "X"\n{\n'}})
     client.diagnostics(broken_uri, 1)
@@ -270,6 +332,8 @@ def main():
         check(False, "LSP formatting reports unbalanced files as errors")
     except AssertionError as e:
         check("missing '}'" in str(e), "LSP formatting reports unbalanced files as errors")
+
+    unstyled_dir.cleanup()
 
     print("syntax.shader")
     syntax_uri = open_doc(client, FIXTURES / "syntax.shader")

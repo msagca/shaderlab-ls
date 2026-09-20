@@ -720,8 +720,7 @@ json toRange(std::string_view text, const LineIndex &lines, Span span, Encoding 
 }
 json completion(const Analysis &a, size_t offset, const FeatureContext &context) {
   if (auto unit = a.unitAt(offset)) {
-    bool glsl = a.kind == DocumentKind::ShaderLab && a.shader.blocks[a.units[*unit].block].kind == BlockKind::GlslProgram;
-    if (!glsl)
+    if (!a.isGlsl(*unit))
       return hlslCompletion(a, *unit, offset, context);
     return {{"isIncomplete", false}, {"items", json::array()}};
   }
@@ -731,7 +730,7 @@ json completion(const Analysis &a, size_t offset, const FeatureContext &context)
 }
 json hover(const Analysis &a, size_t offset, const FeatureContext &context) {
   if (auto unit = a.unitAt(offset))
-    return hlslHover(a, *unit, offset, context);
+    return a.isGlsl(*unit) ? nullptr : hlslHover(a, *unit, offset, context);
   if (a.kind == DocumentKind::ShaderLab)
     return shaderLabHover(a, offset, context);
   return nullptr;
@@ -739,6 +738,8 @@ json hover(const Analysis &a, size_t offset, const FeatureContext &context) {
 json definition(const Analysis &a, size_t offset, const FeatureContext &context) {
   auto local = [&](Span span) { return location(a.path, a.text, a.lines, span, context.encoding); };
   if (auto unit = a.unitAt(offset)) {
+    if (a.isGlsl(*unit))
+      return nullptr;
     std::vector<size_t> units = a.visibleUnits(*unit);
     auto project = UnityProject::forFile(a.path, context.editorOverride);
     for (const HlslInclude &include : a.units[*unit].scan.includes) {

@@ -16,4 +16,8 @@ struct FormatResult {
 // Comments, strings, property attribute text and keyword casing are preserved. Files with unbalanced braces or
 // unterminated blocks, strings or comments are not formatted.
 FormatResult formatShaderLab(std::string_view source, const FormatOptions &options);
+// Formats a file that is code from end to end - .compute, .hlsl, .cginc, .hlslinc, .glsl, .glslinc - by handing
+// all of it to clang-format, with the same treatment the code blocks of a .shader get. Not ok when clang-format is
+// not installed or refuses the file, in which case it is left alone.
+FormatResult formatCode(std::string_view source, const FormatOptions &options);
 } // namespace sls

@@ -13,9 +13,10 @@ enum class DocumentKind {
   ShaderLab, // .shader
   Compute, // .compute: one HLSL program with #pragma kernel entry points
   HlslInclude, // .hlsl, .cginc, .hlslinc: shared code without a program context
+  Glsl, // .glsl, .glslinc: formatted, never analyzed, like a GLSLPROGRAM block
 };
 DocumentKind documentKindFor(const std::filesystem::path &path);
-// A region of HLSL: a ShaderLab code block, or the whole file for HLSL documents.
+// A region of HLSL: a ShaderLab code block, or the whole file for HLSL documents. GLSL units carry no scan.
 struct HlslUnit {
   Span range;
   int block = -1; // index into ShaderFile::blocks, -1 for HLSL documents
@@ -33,6 +34,8 @@ struct Analysis {
   // Units whose code is visible from `unit`: for a program block, the matching include blocks plus itself.
   std::vector<size_t> visibleUnits(size_t unit) const;
   bool isProgram(size_t unit) const;
+  // GLSL is formatted but not analyzed: a GLSLPROGRAM block, or all of a .glsl/.glslinc document.
+  bool isGlsl(size_t unit) const;
 };
 std::shared_ptr<const Analysis> analyze(std::filesystem::path path, std::string text);
 // Include files read from disk, cached by modification time.

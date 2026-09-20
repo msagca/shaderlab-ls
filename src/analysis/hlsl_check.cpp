@@ -60,6 +60,8 @@ namespace {
       };
     }
     std::vector<Diagnostic> run() {
+      if (a_.kind == DocumentKind::Glsl)
+        return {}; // GLSL is not compiled, in a block or in a file of its own
       collectZeroParamMacros();
       if (a_.kind == DocumentKind::HlslInclude) {
         compiler_ = choose(false);

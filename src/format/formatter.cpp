@@ -431,4 +431,37 @@ namespace {
 FormatResult formatShaderLab(std::string_view source, const FormatOptions &options) {
   return Formatter(source, options).run();
 }
+FormatResult formatCode(std::string_view source, const FormatOptions &options) {
+  FormatResult result;
+  std::string_view body = source;
+  bool bom = body.substr(0, 3) == "\xEF\xBB\xBF";
+  if (bom)
+    body.remove_prefix(3);
+  if (trim(body).empty()) { // nothing to lay out, and clang-format would hand back an empty file
+    result.ok = true;
+    result.text = source;
+    return result;
+  }
+  std::optional<std::string> formatted = options.clangFormat.format(body);
+  if (!formatted) {
+    result.error = options.clangFormat.available() ? "clang-format refused it" : "clang-format could not be run";
+    return result;
+  }
+  std::string newline = source.find("\r\n") != std::string_view::npos ? "\r\n" : "\n";
+  if (bom)
+    result.text = "\xEF\xBB\xBF"; // the file went to clang-format without it; keep it
+  std::string_view text = *formatted;
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r'))
+    text.remove_suffix(1);
+  for (size_t start = 0; start <= text.size();) {
+    size_t end = text.find('\n', start);
+    result.text += rtrim(text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start));
+    result.text += newline;
+    if (end == std::string_view::npos)
+      break;
+    start = end + 1;
+  }
+  result.ok = true;
+  return result;
+}
 } // namespace sls
