@@ -1,0 +1,139 @@
+name: release
+
+# Tagging is what publishes: push v<major>.<minor>.<patch> and the binaries for it appear on the release of the same
+# name. The tag has to agree with the version in CMakeLists.txt, which stays the one place the version is written.
+# workflow_dispatch builds and packages the same way but publishes nothing, for trying the packaging out.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Not ubuntu-latest: the runner's glibc becomes the floor for everyone who runs the binary, so the release
+          # is built on the oldest image still offered. libstdc++ and libgcc are linked in for the same reason.
+          - { os: ubuntu-22.04, target: linux-x64, exe: shaderlab-ls }
+          - { os: windows-latest, target: windows-x64, exe: shaderlab-ls.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - name: Resolve the version
+        shell: bash
+        run: |
+          # The project() line specifically, so a three-part cmake_minimum_required cannot match first. [.] rather
+          # than an escaped dot: this runs through several layers of quoting.
+          version=$(grep -F 'project(' CMakeLists.txt | grep -oE 'VERSION [0-9]+[.][0-9]+[.][0-9]+' | head -1 | cut -d' ' -f2)
+          if [ -z "$version" ]; then
+            echo "No project version found in CMakeLists.txt" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match the project version ${version} in CMakeLists.txt" >&2
+            echo "Bump project(... VERSION ...) and retag, so the binary reports what the release is called." >&2
+            exit 1
+          fi
+          echo "VERSION=v${version}" >> "$GITHUB_ENV"
+
+      - name: Install tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build clang-format
+          # There is no FXC on Linux: HLSL compiles with DXC, installed the way a user would, on the library path.
+          mkdir -p "$RUNNER_TEMP/dxc"
+          curl -sfL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/linux_dxc_2026_05_26.x86_64.tar.gz | tar xz -C "$RUNNER_TEMP/dxc"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/dxc/lib" >> "$GITHUB_ENV"
+
+      - name: Install tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang-format -ErrorAction SilentlyContinue)) { choco install llvm -y --no-progress }
+          # FXC comes with Windows. The SDK's DXC stands in for a Unity editor's, so the #pragma use_dxc test runs too.
+          $dxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\dxcompiler.dll" |
+            Sort-Object FullName | Select-Object -Last 1
+          if ($dxc) { "SHADERLAB_LS_TEST_DXC=$($dxc.FullName)" >> $env:GITHUB_ENV }
+
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake --build build
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: build.cmd Release
+
+      - name: Test
+        shell: bash
+        run: python tests/run_tests.py "${{ github.workspace }}/build/${{ matrix.exe }}"
+
+      - name: Fuzz
+        shell: bash
+        env:
+          FUZZ_COMPILE: '1'
+        run: python tests/fuzz.py "${{ github.workspace }}/build/${{ matrix.exe }}" 50
+
+      - name: Check what the binary reports
+        shell: bash
+        run: |
+          reported=$("${{ github.workspace }}/build/${{ matrix.exe }}" --version | awk '{print $2}')
+          if [ "v${reported}" != "${VERSION}" ]; then
+            echo "Binary reports ${reported}, release is ${VERSION}" >&2
+            exit 1
+          fi
+
+      - name: Package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/shaderlab-ls-${VERSION}-${{ matrix.target }}.tar.gz" -C build shaderlab-ls
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path build\shaderlab-ls.exe -DestinationPath "dist\shaderlab-ls-$env:VERSION-${{ matrix.target }}.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum * > SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*

@@ -91,11 +91,26 @@ Unity installs are found through Unity Hub: `%ProgramFiles%\Unity\Hub\Editor` an
 `%APPDATA%\UnityHub\secondaryInstallPath.json` on Windows, `~/Unity/Hub/Editor` and
 `$XDG_CONFIG_HOME/UnityHub/secondaryInstallPath.json` on Linux.
 
+## Install
+
+Each release carries an x86-64 binary for Windows and Linux, built and tested by
+[CI](.github/workflows/release.yml) from the tag it is named after:
+
+| file | for |
+| --- | --- |
+| `shaderlab-ls-<version>-windows-x64.zip` | Windows 10/11, x86-64 |
+| `shaderlab-ls-<version>-linux-x64.tar.gz` | Linux, x86-64, glibc 2.35 or newer |
+
+Unpack it and put `shaderlab-ls` on `PATH`; `SHA256SUMS` on the release covers both archives. Neither binary needs
+anything installed alongside it: the MSVC runtime is linked statically, as are libstdc++ and libgcc on Linux, and
+DXC is loaded only if it is there (see [Platforms](#platforms)). The Neovim plugin needs none of this — it
+builds the server from its own checkout (see [Neovim](#neovim)).
+
 ## Build
 
-There are no released binaries; the server is built on the machine that runs it. It needs CMake 3.25+, Ninja and a
-C++20 compiler — Visual Studio with the C++ workload and a Windows 10/11 SDK (for `d3dcompiler.h`) on Windows, any
-recent GCC or Clang on Linux; `nlohmann/json` is fetched at configure time.
+The server can equally be built on the machine that runs it. It needs CMake 3.25+, Ninja and a C++20 compiler —
+Visual Studio with the C++ workload and a Windows 10/11 SDK (for `d3dcompiler.h`) on Windows, any recent GCC or
+Clang on Linux; `nlohmann/json` is fetched at configure time.
 [CI](.github/workflows/build.yml) builds and tests it on both on every push and keeps each build as an artifact.
 
 ```
@@ -109,6 +124,18 @@ finds; the `use_dxc` check needs a DXC, so set `SHADERLAB_LS_TEST_DXC` or have a
 ```
 python tests\run_tests.py build\shaderlab-ls.exe
 python tests\fuzz.py build\shaderlab-ls.exe 300
+```
+
+### Releasing
+
+`CMakeLists.txt` holds the version and the tag follows it, never the other way round: bump
+`project(... VERSION x.y.z)`, commit, then tag `vx.y.z` and push the tag. The
+[release workflow](.github/workflows/release.yml) refuses a tag that disagrees with that version, and refuses a
+binary that reports a different one from `--version`, so a release cannot be named something its contents deny.
+It builds, tests and fuzzes both targets before publishing, and attaches `SHA256SUMS`.
+
+```
+git tag v0.2.0 && git push origin v0.2.0
 ```
 
 ## Usage
