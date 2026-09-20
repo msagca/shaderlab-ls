@@ -4,49 +4,43 @@
 #else
 #include <csignal>
 #endif
-
 #include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <iterator>
 #include <string>
-
 #include "analysis/analysis.h"
 #include "analysis/hlsl_check.h"
 #include "common/util.h"
 #include "format/formatter.h"
 #include "lsp/server.h"
 #include "lsp/transport.h"
-
 namespace {
-
 void printUsage() {
-  std::printf("shaderlab-ls %s - ShaderLab/HLSL language server for Unity shaders (FXC, DXC)\n\n"
-              "Usage:\n"
-              "  shaderlab-ls [--stdio]                  Run the language server over stdio.\n"
-              "  shaderlab-ls --check <file> [--editor <path>] [--dxc <library>] [--compiler auto|fxc|dxc|none]\n"
-              "                                          Print diagnostics for a .shader/.compute/.hlsl file.\n"
-              "  shaderlab-ls --format <file|-> [--assume-filename <path>] [--clang-format <exe>]\n"
-              "                                          Write a formatted .shader file to stdout (- reads stdin;\n"
-              "                                          --assume-filename says which .clang-format applies to it).\n"
-              "  shaderlab-ls --version\n",
-              SHADERLAB_LS_VERSION);
+  std::printf(
+    "shaderlab-ls %s - ShaderLab/HLSL language server for Unity shaders (FXC, DXC)\n\n"
+    "Usage:\n"
+    "  shaderlab-ls [--stdio]                  Run the language server over stdio.\n"
+    "  shaderlab-ls --check <file> [--editor <path>] [--dxc <library>] [--compiler auto|fxc|dxc|none]\n"
+    "                                          Print diagnostics for a .shader/.compute/.hlsl file.\n"
+    "  shaderlab-ls --format <file|-> [--assume-filename <path>] [--clang-format <exe>]\n"
+    "                                          Write a formatted .shader file to stdout (- reads stdin;\n"
+    "                                          --assume-filename says which .clang-format applies to it).\n"
+    "  shaderlab-ls --version\n",
+    SHADERLAB_LS_VERSION);
 }
-
 // Windows opens the standard streams in text mode, which would rewrite the newlines of a formatted file.
 void binaryStdout() {
 #ifdef _WIN32
   _setmode(_fileno(stdout), _O_BINARY);
 #endif
 }
-
 void binaryStdin() {
 #ifdef _WIN32
   _setmode(_fileno(stdin), _O_BINARY);
 #endif
 }
-
-int formatFile(const std::string& file, const std::string& assumeFilename, const std::string& clangFormat) {
+int formatFile(const std::string &file, const std::string &assumeFilename, const std::string &clangFormat) {
   binaryStdout();
   std::string source;
   if (file == "-") {
@@ -60,9 +54,9 @@ int formatFile(const std::string& file, const std::string& assumeFilename, const
     }
     source = std::move(*text);
   }
-  const std::string& styleFor = file == "-" ? assumeFilename : file;
+  const std::string &styleFor = file == "-" ? assumeFilename : file;
   sls::FormatOptions options = sls::resolveStyle(std::filesystem::path(std::u8string(styleFor.begin(), styleFor.end())),
-                                                clangFormat);
+    clangFormat);
   sls::FormatResult result = sls::formatShaderLab(source, options);
   if (!result.ok) {
     std::fprintf(stderr, "shaderlab-ls: can't format %s: %s\n", file == "-" ? "stdin" : file.c_str(), result.error.c_str());
@@ -71,25 +65,29 @@ int formatFile(const std::string& file, const std::string& assumeFilename, const
   std::fwrite(result.text.data(), 1, result.text.size(), stdout);
   return 0;
 }
-
-const char* severityName(sls::Severity severity) {
+const char *severityName(sls::Severity severity) {
   switch (severity) {
-    case sls::Severity::Error: return "error";
-    case sls::Severity::Warning: return "warning";
-    case sls::Severity::Information: return "info";
-    case sls::Severity::Hint: return "hint";
+  case sls::Severity::Error:
+    return "error";
+  case sls::Severity::Warning:
+    return "warning";
+  case sls::Severity::Information:
+    return "info";
+  case sls::Severity::Hint:
+    return "hint";
   }
   return "";
 }
-
 sls::CompilerChoice compilerChoice(std::string_view name) {
-  if (name == "fxc") return sls::CompilerChoice::Fxc;
-  if (name == "dxc") return sls::CompilerChoice::Dxc;
-  if (name == "none") return sls::CompilerChoice::None;
+  if (name == "fxc")
+    return sls::CompilerChoice::Fxc;
+  if (name == "dxc")
+    return sls::CompilerChoice::Dxc;
+  if (name == "none")
+    return sls::CompilerChoice::None;
   return sls::CompilerChoice::Auto;
 }
-
-int check(const std::string& file, const std::string& editor, const std::string& dxc, const std::string& compiler) {
+int check(const std::string &file, const std::string &editor, const std::string &dxc, const std::string &compiler) {
   std::filesystem::path path(std::u8string(file.begin(), file.end()));
   auto text = sls::readFile(path);
   if (!text) {
@@ -109,19 +107,16 @@ int check(const std::string& file, const std::string& editor, const std::string&
     std::fprintf(stderr, "No HLSL compiler: FXC exists on Windows only, and no DXC was found (see --dxc).\n");
   }
   int errors = 0;
-  for (const sls::Diagnostic& diagnostic : diagnostics) {
+  for (const sls::Diagnostic &diagnostic : diagnostics) {
     sls::Position position = analysis->lines.toPosition(analysis->text, diagnostic.span.begin, sls::Encoding::Utf8);
-    std::printf("%s:%d:%d: %s: %s [%s%s%s]\n", file.c_str(), position.line + 1, position.character + 1,
-                severityName(diagnostic.severity), diagnostic.message.c_str(), diagnostic.source.c_str(),
-                diagnostic.code.empty() ? "" : " ", diagnostic.code.c_str());
-    if (diagnostic.severity == sls::Severity::Error) ++errors;
+    std::printf("%s:%d:%d: %s: %s [%s%s%s]\n", file.c_str(), position.line + 1, position.character + 1, severityName(diagnostic.severity), diagnostic.message.c_str(), diagnostic.source.c_str(), diagnostic.code.empty() ? "" : " ", diagnostic.code.c_str());
+    if (diagnostic.severity == sls::Severity::Error)
+      ++errors;
   }
   return errors > 0 ? 1 : 0;
 }
-
-}  // namespace
-
-int main(int argc, char** argv) {
+} // namespace
+int main(int argc, char **argv) {
 #ifndef _WIN32
   // clang-format may exit before it has read all of its input; that must not take the server with it.
   std::signal(SIGPIPE, SIG_IGN);
@@ -162,9 +157,10 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (!formatPath.empty()) return formatFile(formatPath, assumeFilename, clangFormat);
-  if (!checkFile.empty()) return check(checkFile, editor, dxc, compiler);
-
+  if (!formatPath.empty())
+    return formatFile(formatPath, assumeFilename, clangFormat);
+  if (!checkFile.empty())
+    return check(checkFile, editor, dxc, compiler);
   sls::Transport transport;
   sls::Server server(transport);
   return server.run();
