@@ -156,9 +156,22 @@ vim.pack.add { 'https://github.com/msagca/shaderlab-ls' }
 vim.lsp.enable 'shaderlab_ls'
 ```
 
-A plugin manager checks the repository out but does not build it (see [Build](#build)). The config runs the `build/`
-executable from the checkout when it is there and falls back to `shaderlab-ls` on `PATH`, so building it in place on
-install and on every update is enough:
+A plugin manager checks the repository out but does not build it (see [Build](#build)), so the config does it: when
+the server starts it compares the `build/` executable against the sources, and builds the repository in place if the
+executable is missing or older. That is a build on install, a rebuild after every update, and nothing to configure —
+the two lines above are the whole setup.
+
+The check runs each time a client starts rather than once when the config is read, so it does not depend on the
+plugin manager announcing anything: `vim.pack.update()`, a bare `git pull` and any other plugin manager are all
+caught the same way. The build runs in the background and the server restarts itself when it finishes, so a shader
+opened while it is going picks the new executable up on its own.
+
+Building needs CMake, Ninja and a C++ compiler. Without them the build fails with the toolchain's own message; set
+`vim.g.shaderlab_ls_auto_build = false` to be warned that the executable is out of date instead, and build it
+yourself. Either way the config falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
+
+To build at update time instead of when the first shader is opened, front-load it with a `PackChanged` hook — the
+config then finds the executable already current and does nothing:
 
 ```lua
 local build = vim.fn.has 'win32' == 1 and { 'cmd.exe', '/c', 'build.cmd' } or { 'sh', 'build.sh' }
@@ -167,20 +180,14 @@ vim.api.nvim_create_autocmd('PackChanged', {
   callback = function(event)
     local data = event.data
     if data.spec.name ~= 'shaderlab-ls' or data.kind == 'delete' then return end
-    vim.system(build, { cwd = data.path }, function(result)
-      vim.schedule(function()
-        if result.code == 0 then
-          vim.notify 'shaderlab-ls built'
-        else
-          vim.notify('shaderlab-ls build failed:\n' .. result.stderr, vim.log.levels.ERROR)
-        end
-      end)
-    end)
+    vim.system(build, { cwd = data.path })
   end,
 })
 ```
 
-The build runs in the background, so a shader opened while it is going gets no server; reopen it afterwards.
+Note that `vim.pack.update()` checks a plugin out — and only then fires `PackChanged` — when you `:write` its
+confirmation buffer; closing that buffer updates nothing. A hook is an optimization for that reason too: the config
+does not care how, or whether, the checkout moved.
 
 By hand, or with another plugin manager: copy `lsp/shaderlab_ls.lua` into a runtime `lsp/` folder, put the
 executable on `PATH`, and map the filetypes yourself:
