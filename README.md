@@ -101,10 +101,11 @@ Each release carries an x86-64 binary for Windows and Linux, built and tested by
 | `shaderlab-ls-<version>-windows-x64.zip` | Windows 10/11, x86-64 |
 | `shaderlab-ls-<version>-linux-x64.tar.gz` | Linux, x86-64, glibc 2.35 or newer |
 
-Unpack it and put `shaderlab-ls` on `PATH`; `SHA256SUMS` on the release covers both archives. Neither binary needs
-anything installed alongside it: the MSVC runtime is linked statically, as are libstdc++ and libgcc on Linux, and
-DXC is loaded only if it is there (see [Platforms](#platforms)). The Neovim plugin needs none of this — it
-builds the server from its own checkout (see [Neovim](#neovim)).
+Unpack it and put `shaderlab-ls` on `PATH`; `SHA256SUMS` on the release covers both archives. The Windows binary
+needs nothing installed beside it, its runtime being linked in; the Linux one needs the C and C++ runtimes it was
+built against, which is to say glibc 2.35 and libstdc++ from GCC 11, or newer. DXC is loaded only if it is there
+(see [Platforms](#platforms)). The Neovim plugin needs none of this — it builds the server from its own checkout
+(see [Neovim](#neovim)).
 
 ## Build
 

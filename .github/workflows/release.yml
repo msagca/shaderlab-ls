@@ -2,7 +2,7 @@ name: release
 
 # Tagging is what publishes: push v<major>.<minor>.<patch> and the binaries for it appear on the release of the same
 # name. The tag has to agree with the version in CMakeLists.txt, which stays the one place the version is written.
-# workflow_dispatch builds and packages the same way but publishes nothing, for trying the packaging out.
+# workflow_dispatch builds, packages and tests the same way but publishes nothing, for trying the packaging out.
 on:
   push:
     tags: ['v*']
@@ -12,23 +12,21 @@ permissions:
   contents: read
 
 jobs:
+  # Building and testing are separate images on Linux, on purpose. The binary is built against the oldest glibc
+  # still offered, because the runner's glibc is the floor for everyone who runs it; the tests then run on the same
+  # image as the ordinary CI, because they assert clang-format's exact output and clang-format lays code out
+  # differently from one major version to the next. What gets tested is the packaged binary itself.
   build:
-    name: ${{ matrix.target }}
+    name: build ${{ matrix.target }}
     strategy:
       fail-fast: true
       matrix:
         include:
-          # Not ubuntu-latest: the runner's glibc becomes the floor for everyone who runs the binary, so the release
-          # is built on the oldest image still offered. libstdc++ and libgcc are linked in for the same reason.
           - { os: ubuntu-22.04, target: linux-x64, exe: shaderlab-ls }
           - { os: windows-latest, target: windows-x64, exe: shaderlab-ls.exe }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.x'
 
       - name: Resolve the version
         shell: bash
@@ -47,30 +45,14 @@ jobs:
           fi
           echo "VERSION=v${version}" >> "$GITHUB_ENV"
 
-      - name: Install tools (Linux)
+      - name: Install Ninja (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build clang-format
-          # There is no FXC on Linux: HLSL compiles with DXC, installed the way a user would, on the library path.
-          mkdir -p "$RUNNER_TEMP/dxc"
-          curl -sfL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/linux_dxc_2026_05_26.x86_64.tar.gz | tar xz -C "$RUNNER_TEMP/dxc"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/dxc/lib" >> "$GITHUB_ENV"
-
-      - name: Install tools (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          if (-not (Get-Command clang-format -ErrorAction SilentlyContinue)) { choco install llvm -y --no-progress }
-          # FXC comes with Windows. The SDK's DXC stands in for a Unity editor's, so the #pragma use_dxc test runs too.
-          $dxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\dxcompiler.dll" |
-            Sort-Object FullName | Select-Object -Last 1
-          if ($dxc) { "SHADERLAB_LS_TEST_DXC=$($dxc.FullName)" >> $env:GITHUB_ENV }
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc"
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
 
       - name: Build (Windows)
@@ -78,20 +60,13 @@ jobs:
         shell: cmd
         run: build.cmd Release
 
-      - name: Test
-        shell: bash
-        run: python tests/run_tests.py "${{ github.workspace }}/build/${{ matrix.exe }}"
-
-      - name: Fuzz
-        shell: bash
-        env:
-          FUZZ_COMPILE: '1'
-        run: python tests/fuzz.py "${{ github.workspace }}/build/${{ matrix.exe }}" 50
-
+      # Proof that the binary runs on the image it was built for, which the test job cannot give: the tests run on a
+      # newer one. Also the guard that a release cannot be named something its contents deny.
       - name: Check what the binary reports
         shell: bash
         run: |
           reported=$("${{ github.workspace }}/build/${{ matrix.exe }}" --version | awk '{print $2}')
+          echo "binary reports ${reported}, release is ${VERSION}"
           if [ "v${reported}" != "${VERSION}" ]; then
             echo "Binary reports ${reported}, release is ${VERSION}" >&2
             exit 1
@@ -115,8 +90,72 @@ jobs:
           name: package-${{ matrix.target }}
           path: dist/*
 
-  publish:
+  test:
+    name: test ${{ matrix.target }}
     needs: build
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux-x64, exe: shaderlab-ls }
+          - { os: windows-latest, target: windows-x64, exe: shaderlab-ls.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.x'
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: package-${{ matrix.target }}
+          path: dist
+
+      - name: Unpack the release archive (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p staged
+          tar -xzf dist/*.tar.gz -C staged
+          chmod +x staged/shaderlab-ls
+
+      - name: Unpack the release archive (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Expand-Archive -Path (Get-ChildItem dist\*.zip)[0].FullName -DestinationPath staged
+
+      - name: Install tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang-format
+          # There is no FXC on Linux: HLSL compiles with DXC, installed the way a user would, on the library path.
+          mkdir -p "$RUNNER_TEMP/dxc"
+          curl -sfL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/linux_dxc_2026_05_26.x86_64.tar.gz | tar xz -C "$RUNNER_TEMP/dxc"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/dxc/lib" >> "$GITHUB_ENV"
+
+      - name: Install tools (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang-format -ErrorAction SilentlyContinue)) { choco install llvm -y --no-progress }
+          # FXC comes with Windows. The SDK's DXC stands in for a Unity editor's, so the #pragma use_dxc test runs too.
+          $dxc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\dxcompiler.dll" |
+            Sort-Object FullName | Select-Object -Last 1
+          if ($dxc) { "SHADERLAB_LS_TEST_DXC=$($dxc.FullName)" >> $env:GITHUB_ENV }
+
+      - name: Test
+        shell: bash
+        run: python tests/run_tests.py "${{ github.workspace }}/staged/${{ matrix.exe }}"
+
+      - name: Fuzz
+        shell: bash
+        env:
+          FUZZ_COMPILE: '1'
+        run: python tests/fuzz.py "${{ github.workspace }}/staged/${{ matrix.exe }}" 50
+
+  publish:
+    needs: test
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
