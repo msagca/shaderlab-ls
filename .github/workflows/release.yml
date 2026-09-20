@@ -12,17 +12,17 @@ permissions:
   contents: read
 
 jobs:
-  # Building and testing are separate images on Linux, on purpose. The binary is built against the oldest glibc
-  # still offered, because the runner's glibc is the floor for everyone who runs it; the tests then run on the same
-  # image as the ordinary CI, because they assert clang-format's exact output and clang-format lays code out
-  # differently from one major version to the next. What gets tested is the packaged binary itself.
+  # Building and testing are separate jobs so that what gets tested is the packaged archive rather than whatever is
+  # left in the build folder: a binary that did not survive packaging fails here instead of on someone's machine.
+  # Note that the runner's glibc is the floor for everyone who runs the binary, so moving to a newer image narrows
+  # the set of distributions a release can run on.
   build:
     name: build ${{ matrix.target }}
     strategy:
       fail-fast: true
       matrix:
         include:
-          - { os: ubuntu-22.04, target: linux-x64, exe: shaderlab-ls }
+          - { os: ubuntu-latest, target: linux-x64, exe: shaderlab-ls }
           - { os: windows-latest, target: windows-x64, exe: shaderlab-ls.exe }
     runs-on: ${{ matrix.os }}
     steps:
