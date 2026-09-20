@@ -8,6 +8,8 @@ local name = vim.fn.fnamemodify(here, ':t:r')  -- the config name is this file's
 local windows = vim.fn.has 'win32' == 1
 local built = vim.fs.joinpath(root, 'build', windows and 'shaderlab-ls.exe' or 'shaderlab-ls')
 local sources = vim.fs.joinpath(root, 'src')
+local repository = 'msagca/shaderlab-ls'
+local marker = vim.fs.joinpath(root, 'build', '.release')  -- the release version the executable beside it came from
 
 local function mtime(path)
   local stat = vim.uv.fs_stat(path)
@@ -126,7 +128,12 @@ local function build()
     vim.notify('shaderlab-ls: building in ' .. root)
     vim.system(cmd, { cwd = root, text = true }, function(result)
       vim.schedule(function()
-        if result.code == 0 then discard_aside() else restore_aside() end
+        if result.code == 0 then
+          discard_aside()
+          pcall(os.remove, marker)  -- what is at `built` is this checkout's now, not a release
+        else
+          restore_aside()
+        end
         report(result)
         -- Restart onto what was just linked. The server ran from the moved image throughout, so the only gap is
         -- here, rather than for the length of a build.
@@ -137,22 +144,118 @@ local function build()
   end)
 end
 
+-- Releases carry a binary for the platforms CI builds, so a checkout does not oblige anyone to install a C++
+-- toolchain to get a diagnostic. Set vim.g.shaderlab_ls_download = false to always build from the checkout instead.
+local function release_version()
+  local ok, text = pcall(vim.fn.readfile, vim.fs.joinpath(root, 'CMakeLists.txt'))
+  if not ok then return nil end
+  for _, line in ipairs(text) do
+    -- The project() line, so a three-part cmake_minimum_required cannot answer for it.
+    if line:find('project(', 1, true) then
+      local version = line:match 'VERSION%s+(%d+%.%d+%.%d+)'
+      if version then return version end
+    end
+  end
+end
+
+-- The release asset for this machine, or nothing when no release covers it: only x86-64 Windows and Linux are
+-- built, so everything else builds from source as before.
+local function asset_for(version)
+  local machine = vim.uv.os_uname().machine
+  if machine ~= 'x86_64' and machine ~= 'AMD64' then return nil end
+  if windows then return ('shaderlab-ls-v%s-windows-x64.zip'):format(version) end
+  if vim.fn.has 'linux' == 1 then return ('shaderlab-ls-v%s-linux-x64.tar.gz'):format(version) end
+end
+
+local function installed_release()
+  local ok, lines = pcall(vim.fn.readfile, marker)
+  return ok and lines[1] or nil
+end
+
+-- Downloaded, checked against the release's own SHA256SUMS, and only then unpacked over the executable. An archive
+-- that does not match what the release says it is never reaches disk as a program.
+local function download(version, done)
+  local asset = asset_for(version)
+  if not asset then return done(false, 'no released binary for this platform') end
+  local base = ('https://github.com/%s/releases/download/v%s'):format(repository, version)
+  local scratch = vim.fn.tempname()
+  vim.fn.mkdir(scratch, 'p')
+  local archive = vim.fs.joinpath(scratch, asset)
+  local sums = vim.fs.joinpath(scratch, 'SHA256SUMS')
+  vim.notify('shaderlab-ls: downloading ' .. asset)
+  local fetch = { 'curl', '-sfL', '--retry', '2', '-o', archive, base .. '/' .. asset, '-o', sums, base .. '/SHA256SUMS' }
+  vim.system(fetch, { text = true }, function(result)
+    vim.schedule(function()
+      if result.code ~= 0 then return done(false, 'could not download ' .. asset) end
+      local handle = io.open(archive, 'rb')
+      local bytes = handle and handle:read 'a'
+      if handle then handle:close() end
+      if not bytes then return done(false, 'could not read the downloaded archive') end
+      local want
+      for _, line in ipairs(vim.fn.readfile(sums)) do
+        local sum, named = line:match '^(%x+)%s+%*?(.+)$'
+        if named == asset then want = sum end
+      end
+      if not want then return done(false, 'SHA256SUMS does not mention ' .. asset) end
+      if want ~= vim.fn.sha256(bytes) then return done(false, 'checksum mismatch for ' .. asset) end
+      local directory = vim.fs.dirname(built)
+      vim.fn.mkdir(directory, 'p')
+      move_aside()  -- the same reason a build needs it: this replaces an executable that may be running
+      local unpack = windows
+          and { 'powershell', '-NoProfile', '-NonInteractive', '-Command',
+            ("Expand-Archive -Path '%s' -DestinationPath '%s' -Force"):format(archive, directory) }
+        or { 'tar', '-xzf', archive, '-C', directory }
+      vim.system(unpack, { text = true }, function(unpacked)
+        vim.schedule(function()
+          if unpacked.code ~= 0 or not vim.uv.fs_stat(built) then
+            restore_aside()
+            return done(false, 'could not unpack ' .. asset)
+          end
+          discard_aside()
+          pcall(vim.fn.writefile, { version }, marker)
+          done(true)
+        end)
+      end)
+    end)
+  end)
+end
+
+-- A release if there is one for this machine, the checkout's own build otherwise, and the build as the fallback
+-- when a download cannot be had at all: offline, behind a proxy, or a platform with no asset.
+local function provide()
+  state.attempted = true
+  local version = release_version()
+  local buildable = vim.g.shaderlab_ls_auto_build ~= false
+  if vim.g.shaderlab_ls_download == false or not version or not asset_for(version) then
+    if buildable then return build() end
+    vim.notify('shaderlab-ls: the executable is out of date and neither downloading nor building is enabled',
+      vim.log.levels.WARN)
+    return
+  end
+  download(version, function(ok, err)
+    if ok then
+      vim.notify('shaderlab-ls: installed v' .. version)
+      vim.lsp.enable(name, false)
+      vim.lsp.enable(name)
+      return
+    end
+    if buildable then
+      vim.notify(('shaderlab-ls: %s; building from the checkout instead'):format(err), vim.log.levels.WARN)
+      return build()
+    end
+    vim.notify('shaderlab-ls: ' .. err, vim.log.levels.ERROR)
+  end)
+end
+
 local function resolve()
   if not vim.uv.fs_stat(sources) then return 'shaderlab-ls' end  -- a copy of this file alone, not the repository
   local have = mtime(built)
+  -- A released binary is current for the version it was released as. Sources that moved on since that tag are
+  -- unreleased, and rebuilding for them would demand the toolchain the release exists to spare people; bump the
+  -- version, or set vim.g.shaderlab_ls_download = false, to build what is in the checkout instead.
+  if have and installed_release() ~= nil and installed_release() == release_version() then return built end
   if have and have >= newest_source() then return built end
-  if not state.attempted then
-    if vim.g.shaderlab_ls_auto_build == false then
-      vim.notify(
-        ('shaderlab-ls: %s in %s'):format(
-          have and 'the executable is out of date; rebuild it' or 'nothing is built yet; build it', root),
-        vim.log.levels.WARN
-      )
-      state.attempted = true
-    else
-      build()
-    end
-  end
+  if not state.attempted then provide() end
   -- Until the build lands, serve the stale executable rather than nothing: the one at `built`, or the newest image
   -- a build moved out of the way, whether this session's or one left by a session that ended mid-build. Failing
   -- both, a shaderlab-ls on PATH.
@@ -179,7 +282,14 @@ return {
   executable = resolve,
   -- GLSL is formatted but never analyzed, here as in a GLSLPROGRAM block; pair it with glsl_analyzer for the rest.
   filetypes = { 'shaderlab', 'hlsl', 'glsl' },
-  root_markers = { 'ProjectSettings', 'Assets', '.git' },
+  -- root_markers, but conditional: nothing starts until there is something to start. resolve() is what sets a
+  -- download or a build going, and on a checkout that has neither yet it can only answer with the name on PATH.
+  -- Starting that would report a missing language server seconds before the download it just triggered arrives
+  -- and makes the message untrue; the restart afterwards comes back through here with an executable to name.
+  root_dir = function(bufnr, on_dir)
+    if vim.fn.executable(resolve()) == 0 then return end
+    on_dir(vim.fs.root(bufnr, { 'ProjectSettings', 'Assets', '.git' }))
+  end,
   init_options = {
     -- unityEditorPath = 'C:/Program Files/Unity/Hub/Editor/6000.6.0f1/Editor',
     -- clangFormatPath = 'C:/Program Files/LLVM/bin/clang-format.exe',  -- formatting; found on PATH by default

@@ -104,8 +104,8 @@ Each release carries an x86-64 binary for Windows and Linux, built and tested by
 Unpack it and put `shaderlab-ls` on `PATH`; `SHA256SUMS` on the release covers both archives. The Windows binary
 needs nothing installed beside it, its runtime being linked in; the Linux one needs the C and C++ runtimes of
 the image it is built on, currently glibc 2.39 and libstdc++ from GCC 13, or newer. DXC is loaded only if it is there
-(see [Platforms](#platforms)). The Neovim plugin needs none of this — it builds the server from its own checkout
-(see [Neovim](#neovim)).
+(see [Platforms](#platforms)). The Neovim plugin fetches these for itself
+(see [Neovim](#neovim)), so installing by hand is for everything else.
 
 ## Build
 
@@ -184,20 +184,30 @@ vim.pack.add { 'https://github.com/msagca/shaderlab-ls' }
 vim.lsp.enable 'shaderlab_ls'
 ```
 
-A plugin manager checks the repository out but does not build it (see [Build](#build)), so the config does it: when
-the server starts it compares the `build/` executable against the sources, and builds the repository in place if the
-executable is missing or older. That is a build on install, a rebuild after every update, and nothing to configure —
-the two lines above are the whole setup.
+A plugin manager checks the repository out but does not build it, so the config provides the server itself. When
+it starts and the executable in `build/` is missing or older than the sources, it fetches the release binary for
+the checkout's version, checks it against that release's `SHA256SUMS`, and unpacks it there. Nothing to install and
+nothing to configure — the two lines above are the whole setup, on Windows and Linux x86-64.
+
+Anywhere else, and whenever a download cannot be had, it builds the checkout instead, which needs CMake, Ninja
+and a C++ compiler. Both streams of a build go to a log that `:ShaderlabLsBuildLog` opens, and a failure reports
+the exit code with the last lines of it, which is where ninja leaves the error.
 
 The check runs each time a client starts rather than once when the config is read, so it does not depend on the
 plugin manager announcing anything: `vim.pack.update()`, a bare `git pull` and any other plugin manager are all
-caught the same way. The build runs in the background and the server restarts itself when it finishes, so a shader
-opened while it is going picks the new executable up on its own.
+caught the same way. The work happens in the background and the server restarts itself when it lands, so a shader
+opened meanwhile picks the new executable up on its own.
 
-Building needs CMake, Ninja and a C++ compiler. Both streams of the build go to a log, which `:ShaderlabLsBuildLog`
-opens; a failure reports the exit code and the last lines of it, which is where ninja leaves the error. Set
-`vim.g.shaderlab_ls_auto_build = false` to be warned that the executable is out of date rather than have one built.
-Either way the config falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
+A downloaded binary is current for the version it was released as, so ordinary commits between tags cause no
+downloads and no builds; the version in `CMakeLists.txt` is what moves it. Two switches, either of which leaves
+the other path to do the work:
+
+| setting | effect |
+| --- | --- |
+| `vim.g.shaderlab_ls_download = false` | never download; build the checkout, which is what a developer wants |
+| `vim.g.shaderlab_ls_auto_build = false` | never build; a stale or missing executable is reported instead |
+
+With both set, the config only reports, and falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
 
 The server keeps running while its replacement builds. Neither Windows nor Linux lets a linker write over a
 running executable, so the old one is moved aside first and put back if the build fails: a build that cannot
