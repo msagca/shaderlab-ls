@@ -66,6 +66,27 @@ jobs:
         env:
           FUZZ_COMPILE: '1'
 
+      # The plugin tests drive Neovim itself, so they need one installed. The stable tag rather than a pinned
+      # version: what the plugin has to keep working with is whatever Neovim tells people to run.
+      - name: Install Neovim (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -sfL https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.tar.gz | tar xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Install Neovim (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP nvim.zip
+          Invoke-WebRequest https://github.com/neovim/neovim/releases/download/stable/nvim-win64.zip -OutFile $zip
+          Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
+          Join-Path $env:RUNNER_TEMP 'nvim-win64/bin' >> $env:GITHUB_PATH
+
+      - name: Test the plugin
+        run: python tests/run_plugin_tests.py "$EXE"
+        shell: bash
+
       - uses: actions/upload-artifact@v7
         with:
           name: shaderlab-ls-${{ runner.os }}

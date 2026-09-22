@@ -3,9 +3,7 @@
 [![build](https://github.com/msagca/shaderlab-ls/actions/workflows/build.yml/badge.svg)](https://github.com/msagca/shaderlab-ls/actions/workflows/build.yml)
 
 > [!WARNING]
-> This tool was built with the help of AI. It is tested, but it has not had the years of use that catch the rarer
-> bugs, so use it with caution. Formatting rewrites your files, so keep them under version control and review the
-> changes it makes, and treat its diagnostics as a guide rather than the final word: Unity's own compiler is.
+> Built with AI, use with caution.
 
 A language server for Unity ShaderLab (`.shader`) and the HLSL inside it, plus `.compute`, `.hlsl` and `.cginc`
 files. Written in C++, it compiles the HLSL the way Unity does: with **FXC** (`d3dcompiler_47.dll`) by default, and
@@ -125,7 +123,14 @@ finds; the `use_dxc` check needs a DXC, so set `SHADERLAB_LS_TEST_DXC` or have a
 ```
 python tests\run_tests.py build\shaderlab-ls.exe
 python tests\fuzz.py build\shaderlab-ls.exe 300
+python tests\run_plugin_tests.py build\shaderlab-ls.exe
 ```
+
+The last of those tests the [Neovim plugin](#neovim) rather than the server: the filetypes it claims, and the
+providing of the executable — when a build is started, what serves a buffer while one runs, and what happens to
+that buffer when it lands. It needs Neovim 0.12 or newer on `PATH`. Each case runs in its own headless Neovim
+against a throwaway checkout whose build script stands in for cmake, so nothing is compiled; downloading a release
+is the one path left untested, wanting the network. [CI](.github/workflows/build.yml) runs all three on every push.
 
 ### Releasing
 
@@ -169,34 +174,39 @@ key):
 
 ### Neovim
 
-This repository is also the plugin: [`lsp/shaderlab_ls.lua`](lsp/shaderlab_ls.lua) is the server config and
-[`plugin/shaderlab-ls.lua`](plugin/shaderlab-ls.lua) maps the filetypes — Neovim has no `shaderlab` filetype of its
-own, detects neither `.hlsl` nor `.glslinc`, and gives `.shader` to Godot's `gdshader`, so the mapping claims
-`.shader` unless the file declares a `shader_type`. The server attaches to `glsl` buffers as well, but only to
-format them, so [glsl_analyzer](https://github.com/nolanderc/glsl_analyzer) can run alongside it for completion,
-hover, definitions and diagnostics. Formatting is the one thing both offer, and it is better left here:
-glsl_analyzer 1.7 does not parse the `precision` declarations that Unity's `GLSLSupport.glslinc` opens with — the
-file Unity includes in every `GLSLPROGRAM` snippet — and returns nothing for it. Needs Neovim 0.11+, and 0.12+ for
-`vim.pack`:
+This repository is also the plugin: [`lsp/shaderlab_ls.lua`](lsp/shaderlab_ls.lua) is the server config,
+[`lua/shaderlab-ls.lua`](lua/shaderlab-ls.lua) provides the executable that config names, and
+[`plugin/shaderlab-ls.lua`](plugin/shaderlab-ls.lua) maps the filetypes and sets the providing off — Neovim has no
+`shaderlab` filetype of its own, detects neither `.hlsl` nor `.glslinc`, and gives `.shader` to Godot's `gdshader`, so
+the mapping claims `.shader` unless the file declares a `shader_type`. The server attaches to `glsl` buffers as well,
+but only to format them, so [glsl_analyzer](https://github.com/nolanderc/glsl_analyzer) can run alongside it for
+completion, hover, definitions and diagnostics. Formatting is the one thing both offer, and it is better left here:
+glsl_analyzer 1.7 does not parse the `precision` declarations that Unity's `GLSLSupport.glslinc` opens with — the file
+Unity includes in every `GLSLPROGRAM` snippet — and returns nothing for it. Needs Neovim 0.12+:
 
 ```lua
 vim.pack.add { 'https://github.com/msagca/shaderlab-ls' }
 vim.lsp.enable 'shaderlab_ls'
 ```
 
-A plugin manager checks the repository out but does not build it, so the config provides the server itself. When
-it starts and the executable in `build/` is missing or older than the sources, it fetches the release binary for
-the checkout's version, checks it against that release's `SHA256SUMS`, and unpacks it there. Nothing to install and
-nothing to configure — the two lines above are the whole setup, on Windows and Linux x86-64.
+A plugin manager checks the repository out but does not build it, so the plugin provides the server itself. When
+the executable in `build/` is missing or older than the sources, it fetches the release binary for the checkout's
+version, checks it against that release's `SHA256SUMS`, and unpacks it there. Nothing to install and nothing to
+configure — the two lines above are the whole setup, on Windows and Linux x86-64.
 
 Anywhere else, and whenever a download cannot be had, it builds the checkout instead, which needs CMake, Ninja
 and a C++ compiler. Both streams of a build go to a log that `:ShaderlabLsBuildLog` opens, and a failure reports
 the exit code with the last lines of it, which is where ninja leaves the error.
 
-The check runs each time a client starts rather than once when the config is read, so it does not depend on the
-plugin manager announcing anything: `vim.pack.update()`, a bare `git pull` and any other plugin manager are all
-caught the same way. The work happens in the background and the server restarts itself when it lands, so a shader
-opened meanwhile picks the new executable up on its own.
+The check runs just after startup, and again whenever `PackChanged` announces this plugin: an install or an update
+is met by the download or the build there and then, in the background, with no shader open and nothing waiting on
+it. It also runs whenever a client starts, which is what catches a checkout that moved with nothing announcing it
+— a bare `git pull`, another plugin manager, or a `vim.pack.update()` confirmed in a session you have since left.
+Whichever pass finds the work, the server restarts onto the executable once it lands, and a shader opened while it
+was still coming moves onto it without being reopened.
+
+One attempt per session, so a build that cannot succeed is reported once instead of retried at every restart. An
+update announced later asks for another, and one announced while a build is running is left to that build.
 
 A downloaded binary is current for the version it was released as, so ordinary commits between tags cause no
 downloads and no builds; the version in `CMakeLists.txt` is what moves it. Two switches, either of which leaves
@@ -207,30 +217,15 @@ the other path to do the work:
 | `vim.g.shaderlab_ls_download = false` | never download; build the checkout, which is what a developer wants |
 | `vim.g.shaderlab_ls_auto_build = false` | never build; a stale or missing executable is reported instead |
 
-With both set, the config only reports, and falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
+With both set, the plugin only reports, and falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
 
 The server keeps running while its replacement builds. Neither Windows nor Linux lets a linker write over a
 running executable, so the old one is moved aside first and put back if the build fails: a build that cannot
 succeed leaves exactly what was there before, and the server restarts onto the new executable when one lands.
 
-To build at update time instead of when the first shader is opened, front-load it with a `PackChanged` hook — the
-config then finds the executable already current and does nothing:
-
-```lua
-local build = vim.fn.has 'win32' == 1 and { 'cmd.exe', '/c', 'build.cmd' } or { 'sh', 'build.sh' }
-
-vim.api.nvim_create_autocmd('PackChanged', {
-  callback = function(event)
-    local data = event.data
-    if data.spec.name ~= 'shaderlab-ls' or data.kind == 'delete' then return end
-    vim.system(build, { cwd = data.path })
-  end,
-})
-```
-
 Note that `vim.pack.update()` checks a plugin out — and only then fires `PackChanged` — when you `:write` its
-confirmation buffer; closing that buffer updates nothing. A hook is an optimization for that reason too: the config
-does not care how, or whether, the checkout moved.
+confirmation buffer; closing that buffer updates nothing. Nothing rests on that event either way: an update that
+landed unannounced is found by the pass at the next startup, or by the one at the next client start.
 
 By hand, or with another plugin manager: copy `lsp/shaderlab_ls.lua` into a runtime `lsp/` folder, put the
 executable on `PATH`, and map the filetypes yourself:

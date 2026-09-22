@@ -16,3 +16,42 @@ vim.filetype.add {
     end,
   },
 }
+
+-- The executable the server runs is provided from here as well, not only when the first shader is opened. A plugin
+-- manager checks this repository out and leaves it, so an install or an update is exactly the moment there is
+-- something to download or build, and the moment nothing else is waiting on it. Doing it then, in the background,
+-- means the first shader of the session is met by a server that is already current rather than by a build.
+-- lsp/shaderlab_ls.lua still checks when a client starts, so nothing here is load-bearing.
+local ok, provision = pcall(require, 'shaderlab-ls')
+if not ok then return end
+
+-- After startup rather than during it: 'runtimepath' and the user's vim.lsp.enable() call are both done by then,
+-- so a server that lands seconds later has a config to restart, and the check itself is off the startup path.
+local function refresh(force)
+  vim.schedule(function() provision.refresh(force) end)
+end
+
+if vim.v.vim_did_enter == 1 then
+  refresh()
+else
+  vim.api.nvim_create_autocmd('VimEnter', { once = true, callback = function() refresh() end })
+end
+
+local function same_path(a, b)
+  a, b = vim.fs.normalize(a or ''), vim.fs.normalize(b or '')
+  -- Case-insensitively on Windows: vim.pack and 'runtimepath' need not have spelled the drive or the folders alike.
+  if vim.fn.has 'win32' == 1 then return a:lower() == b:lower() end
+  return a == b
+end
+
+-- An update lands new sources under a checkout that may already have been provisioned this session, spending the
+-- one attempt a session is otherwise allowed, so it asks for another (force). An install is announced before this
+-- file has been loaded and cannot be seen here at all; the pass above is what covers that.
+vim.api.nvim_create_autocmd('PackChanged', {
+  desc = 'Provide the shaderlab-ls executable for an updated checkout',
+  callback = function(event)
+    local data = event.data
+    if data.kind == 'delete' or not same_path(data.path, provision.root) then return end
+    refresh(true)
+  end,
+})
