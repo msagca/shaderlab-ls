@@ -217,6 +217,56 @@ cases.standalone = function()
   until_(attached)
 end
 
+-- A GLSL server enabled by the user, here tests/fake_glsl_server.py, is attached to a shader's GLSL blocks and to
+-- nothing else of it: it is sent the blocks with everything around them blanked, and what it says about the blank
+-- lines, or is asked about them, never reaches the buffer.
+cases.glsl = function()
+  vim.lsp.config('fake_glsl', {
+    cmd = { vim.env.PYTHON, vim.env.FAKE_GLSL, vim.fs.joinpath(fixture, 'glsl-record') },
+    filetypes = { 'glsl' },
+  })
+  vim.lsp.enable { 'fake_glsl', 'shaderlab_ls' }
+  open 'test.shader'  -- no GLSL in it, so no GLSL server either
+  local plain = vim.api.nvim_get_current_buf()
+  open 'glsl.shader'
+  local buf = vim.api.nvim_get_current_buf()
+  local function proxy() return vim.lsp.get_clients({ bufnr = buf, name = 'fake_glsl (shaderlab)' })[1] end
+  local function lines()
+    local client = proxy()
+    if not client then return {} end
+    local namespace = vim.lsp.diagnostic.get_namespace(client.id, false)
+    local found = vim.tbl_map(function(d) return d.lnum end, vim.diagnostic.get(buf, { namespace = namespace }))
+    table.sort(found)
+    return found
+  end
+  local function request(method, line, character)
+    -- Of that client alone: asking the buffer would wait on shaderlab-ls as well, which may still be starting.
+    local response = proxy():request_sync(method, {
+      textDocument = { uri = vim.uri_from_bufnr(buf) },
+      position = { line = line, character = character },
+    }, 10000, buf)
+    return response and response.result
+  end
+
+  vim.wait(30000, function() return #lines() > 0 end, 50)
+  log('proxy plain ' .. #vim.lsp.get_clients { bufnr = plain, name = 'fake_glsl (shaderlab)' })
+  log('proxy glsl ' .. (proxy() and 1 or 0))
+  log('glsl-only clients ' .. #vim.lsp.get_clients { name = 'fake_glsl' })
+  log('diagnostics ' .. table.concat(lines(), ','))
+  log('formats ' .. tostring(proxy():supports_method 'textDocument/formatting'))
+  local hover = request('textDocument/hover', 3, 6)
+  log('hover inside ' .. tostring(hover and hover.contents))
+  hover = request('textDocument/hover', 0, 2)
+  log('hover outside ' .. tostring(hover and hover.contents))
+  local definition = request('textDocument/definition', 3, 6)
+  log('definition ' .. tostring(definition and definition[1].uri == vim.uri_from_bufnr(buf)))
+
+  vim.api.nvim_buf_set_lines(buf, 3, 3, false, { '    float bad;' })
+  vim.wait(10000, function() return table.concat(lines(), ',') ~= '4' end, 50)
+  log('diagnostics after edit ' .. table.concat(lines(), ','))
+  finish()
+end
+
 -- Cases run once startup is over, not while this file is being read: filetype detection and the fixture's own
 -- plugin file are both in place by then, as they are for anyone who opens a shader in an editor already running.
 -- It also puts the eager pass in plugin/shaderlab-ls.lua and the shader being opened in the order that matters,

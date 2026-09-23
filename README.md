@@ -189,7 +189,13 @@ the mapping claims `.shader` unless the file declares a `shader_type`. The serve
 but only to format them, so [glsl_analyzer](https://github.com/nolanderc/glsl_analyzer) can run alongside it for
 completion, hover, definitions and diagnostics. Formatting is the one thing both offer, and it is better left here:
 glsl_analyzer 1.7 does not parse the `precision` declarations that Unity's `GLSLSupport.glslinc` opens with — the file
-Unity includes in every `GLSLPROGRAM` snippet — and returns nothing for it. Needs Neovim 0.12+:
+Unity includes in every `GLSLPROGRAM` snippet — and returns nothing for it.
+
+The same GLSL server also covers the `GLSLPROGRAM` blocks of a `.shader`. Any config enabled for the `glsl`
+filetype whose executable is found gets a second client, named after it with ` (shaderlab)` appended, on each shader
+that has a GLSL block. It is shown the shader as a `.glsl` document with everything outside the blocks blanked, so
+positions line up as they are. Requests from outside a block never reach it, nor does anything it reports there, and
+its formatting is turned off. Set `vim.g.shaderlab_ls_glsl = false` to keep it off shaders. Needs Neovim 0.12+:
 
 ```lua
 vim.pack.add { 'https://github.com/msagca/shaderlab-ls' }

@@ -34,7 +34,8 @@ return {
   -- executable itself rather than talk to the server (conform.nvim's `command`, a keymap, :!) asks for it here.
   -- It resolves exactly as the server does, so it provides the executable too when the checkout is behind.
   executable = executable,
-  -- GLSL is formatted but never analyzed, here as in a GLSLPROGRAM block; pair it with glsl_analyzer for the rest.
+  -- GLSL is formatted but never analyzed, here as in a GLSLPROGRAM block; pair it with glsl_analyzer for the rest,
+  -- which plugin/shaderlab-ls.lua then attaches to GLSLPROGRAM blocks too.
   filetypes = { 'shaderlab', 'hlsl', 'glsl' },
   -- root_markers, but conditional: nothing starts until there is something to start. On a checkout whose
   -- executable is still downloading or building, executable() can only answer with the name on PATH. Starting that

@@ -12,6 +12,7 @@ shaderlab_ls_download is off in every case, which is also the switch a developer
 Usage: python tests/run_plugin_tests.py path/to/shaderlab-ls.exe
 """
 
+import json
 import os
 import pathlib
 import re
@@ -83,6 +84,17 @@ SHADERS = {
     "include.cginc": "float4 tint;\n",
     "unity.hlsl": "float3 identity(float3 v) { return v; }\n",
     "support.glslinc": "precision mediump float;\n",
+    # One GLSL block, with `bad` inside it and outside it: tests/fake_glsl_server.py reports every such line it sees.
+    "glsl.shader": (
+        'Shader "Tests/Glsl" {\n'
+        "  SubShader { Pass {\n"
+        "    GLSLPROGRAM\n"
+        "    void main() { }\n"
+        "    // bad\n"
+        "    ENDGLSL\n"
+        '  } Pass { Name "bad" } }\n'
+        "}\n"
+    ),
 }
 
 
@@ -94,7 +106,7 @@ def fixture_for(case, server, stale=None, fail=False):
     windows = sys.platform == "win32"
     exe_name = "shaderlab-ls.exe" if windows else "shaderlab-ls"
 
-    for part in ("lua/shaderlab-ls.lua", "lsp/shaderlab_ls.lua", "plugin/shaderlab-ls.lua"):
+    for part in ("lua/shaderlab-ls.lua", "lua/shaderlab-ls/glsl.lua", "lsp/shaderlab_ls.lua", "plugin/shaderlab-ls.lua"):
         target = fixture / part
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / part, target)
@@ -142,7 +154,8 @@ def fixture_for(case, server, stale=None, fail=False):
 def run(case, fixture, on_path=False, timeout=90):
     """Runs one case and returns its log as a list of lines, plus whatever Neovim said on stderr."""
     log = fixture / "log"
-    environment = dict(os.environ, FIXTURE=fixture.as_posix(), CASE=case, LOG=str(log))
+    environment = dict(os.environ, FIXTURE=fixture.as_posix(), CASE=case, LOG=str(log), PYTHON=sys.executable,
+                       FAKE_GLSL=str(pathlib.Path(__file__).parent / "fake_glsl_server.py"))
     if on_path:
         environment["PATH"] = str(fixture / "onpath") + os.pathsep + environment.get("PATH", "")
     else:
@@ -325,6 +338,30 @@ def main():
     check(builds(lines) == 0, "nothing is built: there is no checkout to build")
     check(len(attaches(lines)) == 1, "the server on PATH is what runs")
     check(not logged(lines, r"^notify"), "and nothing is reported")
+
+    print("\na GLSL server on a shader's GLSL blocks")
+    fixture = fixture_for("glsl", server, stale=False)
+    lines, stderr = run("glsl", fixture, timeout=60)
+    ran_cleanly(lines, stderr, "glsl")
+    record = fixture / "glsl-record"
+    sent = [json.loads(line) for line in record.read_text(encoding="utf-8").splitlines()] if record.exists() else []
+    opened = [entry for entry in sent if entry["event"] == "open"]
+    changed = [entry for entry in sent if entry["event"] == "change"]
+    check(value(lines, "proxy plain") == "0", "a shader with no GLSL in it gets no GLSL server")
+    check(value(lines, "proxy glsl") == "1", "one with a GLSL block does")
+    check(value(lines, "glsl-only clients") == "0", "and the user's own config is not started for it")
+    check(len(opened) == 1 and opened[0]["languageId"] == "glsl" and opened[0]["uri"].endswith("/glsl.shader.glsl"),
+          "the server is shown the shader as a GLSL document")
+    text = opened[0]["text"].splitlines() if opened else []
+    check(len(text) == 8 and not "".join(text[:3] + text[5:]).strip() and text[3:5] == ["    void main() { }", "    // bad"],
+          "with everything but the block blanked, and the block where it was")
+    check(value(lines, "diagnostics") == "4", "its diagnostics reach the buffer only from inside the block")
+    check(value(lines, "formats") == "false", "formatting is left to shaderlab-ls")
+    check(value(lines, "hover inside") == "hover 3:6", "a request from inside the block is answered, at the same position")
+    check(value(lines, "hover outside") == "nil", "one from outside it is not passed on")
+    check(value(lines, "definition") == "true", "locations in the shader come back as the shader's")
+    check(bool(changed) and all(entry["full"] for entry in changed), "edits are sent as whole documents")
+    check(value(lines, "diagnostics after edit") == "3,5", "and the server follows them")
 
     print()
     if failures:

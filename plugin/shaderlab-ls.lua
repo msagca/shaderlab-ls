@@ -17,6 +17,18 @@ vim.filetype.add {
   },
 }
 
+-- GLSL blocks go to the user's own GLSL language server, whichever it is, through lua/shaderlab-ls/glsl.lua. On
+-- save as well as on open, so a block written into a shader that had none is picked up without reopening it.
+-- Set vim.g.shaderlab_ls_glsl = false to keep GLSL servers off .shader files.
+vim.api.nvim_create_autocmd({ 'FileType', 'BufWritePost' }, {
+  desc = 'Attach GLSL language servers to the GLSL blocks of a shader',
+  callback = function(event)
+    if vim.bo[event.buf].filetype ~= 'shaderlab' then return end
+    local found, glsl = pcall(require, 'shaderlab-ls.glsl')
+    if found then glsl.attach(event.buf) end
+  end,
+})
+
 -- The executable the server runs is provided from here as well, not only when the first shader is opened. A plugin
 -- manager checks this repository out and leaves it, so an install or an update is exactly the moment there is
 -- something to download or build, and the moment nothing else is waiting on it. Doing it then, in the background,
