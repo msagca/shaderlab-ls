@@ -363,6 +363,17 @@ def main():
     check(bool(changed) and all(entry["full"] for entry in changed), "edits are sent as whole documents")
     check(value(lines, "diagnostics after edit") == "3,5", "and the server follows them")
 
+    print("\nwhat a GLSL server is shown of a shader")
+    fixture = fixture_for("glsl_mask", server, stale=False)
+    lines, stderr = run("glsl_mask", fixture, timeout=60)
+    ran_cleanly(lines, stderr, "glsl_mask")
+    masked = json.loads(value(lines, "masked", "null"))
+    ranges = json.loads(value(lines, "ranges", "null"))
+    check(masked == "\n" * 5 + " " * 15 + "\n    void main() { }\n    \n" + " " * 22 + " void main() {} \n\n",
+          "only the GLSL blocks are left, where they were")
+    check(ranges == [[[5, 15], [7, 4]], [[8, 22], [8, 38]]],
+          "and a GLSLPROGRAM in a comment or in HLSL opens none")
+
     print()
     if failures:
         print(f"{len(failures)} failure(s)")

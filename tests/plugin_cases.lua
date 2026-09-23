@@ -267,6 +267,29 @@ cases.glsl = function()
   finish()
 end
 
+-- What a GLSL server is shown of a shader, down to the character: GLSLPROGRAM in a comment or inside HLSL opens
+-- nothing, and a block keeps its lines and columns, including one that opens and closes on the same line.
+cases.glsl_mask = function()
+  local glsl = require 'shaderlab-ls.glsl'
+  local text = table.concat({
+    'Shader "X" { // GLSLPROGRAM in a comment',
+    '  SubShader { Pass {',
+    '    CGPROGRAM',
+    '    // GLSLPROGRAM inside HLSL',
+    '    ENDCG',
+    '    GLSLPROGRAM',
+    '    void main() { }',
+    '    ENDGLSL',
+    '  } Pass { GLSLPROGRAM void main() {} ENDGLSL }',
+    '} }',
+    '',
+  }, '\n')
+  local masked, ranges = glsl._mask(text, 'utf-16')
+  log('masked ' .. vim.json.encode(masked))
+  log('ranges ' .. vim.json.encode(ranges))
+  finish()
+end
+
 -- Cases run once startup is over, not while this file is being read: filetype detection and the fixture's own
 -- plugin file are both in place by then, as they are for anyone who opens a shader in an editor already running.
 -- It also puts the eager pass in plugin/shaderlab-ls.lua and the shader being opened in the order that matters,
