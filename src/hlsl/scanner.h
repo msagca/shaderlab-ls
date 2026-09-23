@@ -32,6 +32,7 @@ struct HlslDecl {
   Span nameSpan;
   std::string detail; // declaration text, whitespace collapsed
   std::string container; // struct or cbuffer name for fields/members
+  std::string doc; // the comment above the declaration, or after it on the same line, without comment markers
   bool zeroParams = false; // macro declared as NAME()
 };
 struct HlslScan {

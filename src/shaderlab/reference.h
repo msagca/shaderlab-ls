@@ -38,6 +38,11 @@ std::span<const Entry> pragmaTargets();
 std::span<const Entry> pragmaRequires();
 std::span<const Entry> renderers();
 std::span<const Entry> preprocessorDirectives();
+// Legacy fixed-function commands (see isLegacyCommand) and the commands inside their blocks.
+std::span<const Entry> legacyCommands();
+std::span<const Entry> legacySubCommands();
+// Built-in texture names a texture property can default to: "white", "bump", ...
+std::span<const Entry> textureDefaults();
 const Entry *find(std::span<const Entry> table, std::string_view name); // case-insensitive
 const Entry *findCommand(std::string_view name);
 const Entry *findKeywordAnywhere(std::string_view name);

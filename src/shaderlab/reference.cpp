@@ -451,22 +451,65 @@ namespace {
     {"gles", "graphics API", "OpenGL ES 2.0. Not in the current reference table; used by Unity's own shaders."},
   };
   constexpr Entry kDirectives[] = {
-    {"include", "#include \"file\"", "Standard HLSL include directive."},
+    {"include", "#include \"file\"", "Inserts the contents of the file here."},
     {"include_with_pragmas", "#include_with_pragmas \"path-to-include-file\"", "Unity: include a file and apply the `#pragma` directives it contains."},
-    {"define", "#define NAME", "Standard HLSL #define directive."},
+    {"define", "#define NAME [value] | #define NAME(arguments) body", "Defines a macro: every later use of `NAME` is replaced with its value or body."},
     {"define_for_platform_compiler", "#define_for_platform_compiler NAME",
       "Unity: sends a `#define` directive to the platform-specific shader compiler. The Unity preprocessor doesn't use "
       "symbols you define this way."},
     {"pragma", "#pragma ...", "Pass Unity-specific or standard HLSL directives to the shader compiler."},
-    {"if", "#if", "Conditional compilation."},
-    {"ifdef", "#ifdef", "Conditional compilation."},
-    {"ifndef", "#ifndef", "Conditional compilation."},
-    {"elif", "#elif", "Conditional compilation."},
-    {"else", "#else", "Conditional compilation."},
-    {"endif", "#endif", "Conditional compilation."},
-    {"undef", "#undef", "Removes a macro definition."},
-    {"error", "#error", "Emits a compile error."},
-    {"line", "#line", "Sets the line number and file name for diagnostics."},
+    {"if", "#if expression", "Compiles the lines that follow only if the expression is nonzero. `defined(NAME)` tests for a macro or shader keyword."},
+    {"ifdef", "#ifdef NAME", "Compiles the lines that follow only if `NAME` is defined, such as a shader keyword from `multi_compile`."},
+    {"ifndef", "#ifndef NAME", "Compiles the lines that follow only if `NAME` is not defined."},
+    {"elif", "#elif expression", "Checks another condition when the branches of the `#if` before it were not taken."},
+    {"else", "#else", "Compiles the lines that follow when no branch of the `#if` before it was taken."},
+    {"endif", "#endif", "Ends an `#if`, `#ifdef` or `#ifndef` block."},
+    {"undef", "#undef NAME", "Removes a macro definition."},
+    {"error", "#error message", "Stops compiling with the given error message."},
+    {"line", "#line number [\"file\"]", "Sets the line number and file name that diagnostics report."},
+  };
+  // Fixed-function commands from before programmable shaders. Unity only honours them in Passes without a shader
+  // program, and the current reference no longer lists them.
+  constexpr Entry kLegacyCommands[] = {
+    {"AlphaTest", "AlphaTest Off | <comparison> CutoffValue",
+      "Legacy fixed-function: discards pixels whose alpha fails the comparison with the cutoff value. It has no effect "
+      "with a shader program; call `clip()` in the shader instead."},
+    {"BindChannels", "BindChannels { Bind \"source\", target }", "Legacy fixed-function: maps the mesh's vertex data to fixed-function inputs."},
+    {"Color", "Color (r, g, b, a) | Color [_Property]", "Legacy fixed-function: draws the object in a solid color when lighting is off."},
+    {"ColorMaterial", "ColorMaterial AmbientAndDiffuse | Emission", "Legacy fixed-function: uses the mesh's vertex colors in place of the material colors."},
+    {"Fog", "Fog { Mode Off | Global | Linear | Exp | Exp2 ... }", "Legacy fixed-function: overrides the scene's fog for this Pass. `Fog { Mode Off }` turns fog off."},
+    {"Lighting", "Lighting On | Off", "Legacy fixed-function: turns per-vertex lighting on or off."},
+    {"Material", "Material { Diffuse [_Color] Ambient [_Color] ... }", "Legacy fixed-function: the material colors per-vertex lighting uses."},
+    {"SeparateSpecular", "SeparateSpecular On | Off", "Legacy fixed-function: adds specular lighting after texturing, so textures don't darken highlights."},
+    {"SetTexture", "SetTexture [_TextureProperty] { combine ... }",
+      "Legacy fixed-function: a texture combiner stage, which combines the texture with the result of the stage "
+      "before it."},
+  };
+  // Commands inside the legacy Material, Fog, SetTexture and BindChannels blocks.
+  constexpr Entry kLegacySubCommands[] = {
+    {"Ambient", "Ambient (r, g, b, a) | Ambient [_Property]", "Material: the color the object has under ambient light."},
+    {"Bind", "Bind \"source\", target", "BindChannels: maps a mesh channel (`vertex`, `normal`, `color`, `texcoord`...) to a fixed-function input."},
+    {"combine", "combine src1 * src2 | src1 + src2 | src1 lerp(src2) src3 ...",
+      "SetTexture: how the stage combines its sources: `texture`, `previous` (the stage before), `primary` (the lit "
+      "color) or `constant`."},
+    {"constantColor", "constantColor (r, g, b, a) | constantColor [_Property]", "SetTexture: the color `combine` reads as `constant`."},
+    {"Density", "Density number", "Fog: the fog density, for the Exp and Exp2 modes."},
+    {"Diffuse", "Diffuse (r, g, b, a) | Diffuse [_Property]", "Material: the base color of the object under light."},
+    {"Emission", "Emission (r, g, b, a) | Emission [_Property]", "Material: the color the object gives off by itself, without any light."},
+    {"matrix", "matrix [_MatrixProperty]", "SetTexture: transforms the texture coordinates with the given matrix."},
+    {"Mode", "Mode Off | Global | Linear | Exp | Exp2", "Fog: the fog mode. `Off` turns fog off for the Pass."},
+    {"Range", "Range near, far", "Fog: where fog starts and ends, for the Linear mode."},
+    {"Shininess", "Shininess number", "Material: the sharpness of highlights, from 0 to 1."},
+    {"Specular", "Specular (r, g, b, a) | Specular [_Property]", "Material: the color of specular highlights."},
+  };
+  // Names of Unity's built-in textures, accepted as the default value of a texture property.
+  constexpr Entry kTextureDefaults[] = {
+    {"white", "built-in texture", "A white texture."},
+    {"black", "built-in texture", "A black texture."},
+    {"gray", "built-in texture", "A mid-gray texture. An empty or unknown name also gives this one."},
+    {"linearGray", "built-in texture", "A gray texture whose value is 0.5 in linear color space."},
+    {"bump", "built-in texture", "A flat normal map: every normal points straight out of the surface. The default for normal map properties."},
+    {"red", "built-in texture", "A red texture."},
   };
 } // namespace
 std::span<const Entry> shaderBlockKeywords() {
@@ -538,6 +581,15 @@ std::span<const Entry> renderers() {
 std::span<const Entry> preprocessorDirectives() {
   return kDirectives;
 }
+std::span<const Entry> legacyCommands() {
+  return kLegacyCommands;
+}
+std::span<const Entry> legacySubCommands() {
+  return kLegacySubCommands;
+}
+std::span<const Entry> textureDefaults() {
+  return kTextureDefaults;
+}
 std::span<const Entry> tagValues(std::string_view key) {
   if (iequals(key, "RenderPipeline"))
     return kRenderPipelineValues;
@@ -604,11 +656,7 @@ bool isScopeKeyword(std::string_view word) {
   return false;
 }
 bool isLegacyCommand(std::string_view word) {
-  for (std::string_view command : {"AlphaTest", "BindChannels", "Color", "ColorMaterial", "Fog", "Lighting", "Material", "SeparateSpecular", "SetTexture"}) {
-    if (iequals(word, command))
-      return true;
-  }
-  return false;
+  return find(kLegacyCommands, word) != nullptr;
 }
 bool isStandardHlslPragma(std::string_view name) {
   return name == "pack_matrix" || name == "warning" || name == "def";

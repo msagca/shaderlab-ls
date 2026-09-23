@@ -394,6 +394,90 @@ def main():
     check(hover is not None and "**Equal**" in hover["contents"]["value"], "hover on a Stencil comparison value")
     hover = client.request("textDocument/hover", {"textDocument": {"uri": valid_uri}, "position": {"line": 43, "character": 23}})
     check(hover is not None and "vertex shader" in hover["contents"]["value"], "hover on #pragma vertex")
+    intrinsic_uri = uri_for(FIXTURES / "unsaved_intrinsics.hlsl")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": intrinsic_uri, "languageId": "hlsl", "version": 1,
+                                                            "text": "float f(float x) { return sqrt(x) + SQRT(x); }\n"}})
+    hover = client.request("textDocument/hover", {"textDocument": {"uri": intrinsic_uri}, "position": {"line": 0, "character": 27}})
+    check(hover is not None and "T sqrt(T x)" in hover["contents"]["value"] and "square root" in hover["contents"]["value"],
+          "hover on an intrinsic shows its signature and description")
+    hover = client.request("textDocument/hover", {"textDocument": {"uri": intrinsic_uri}, "position": {"line": 0, "character": 37}})
+    check(hover is None, "intrinsics are matched case-sensitively")
+    items = client.request("textDocument/completion", {"textDocument": {"uri": intrinsic_uri}, "position": {"line": 0, "character": 26}})
+    items = items["items"] if isinstance(items, dict) else items
+    lerp = next((item for item in items if item["label"] == "lerp"), None)
+    check(lerp is not None and "detail" not in lerp and "labelDetails" not in lerp
+          and "T lerp(T x, T y, T s)" in lerp.get("documentation", {}).get("value", ""),
+          "intrinsic completions keep the list to the name and carry the signature and description as documentation")
+    groupshared = next((item for item in items if item["label"] == "groupshared"), None)
+    check(groupshared is not None and "thread group" in groupshared.get("documentation", {}).get("value", ""),
+          "keyword completions carry their description as documentation")
+
+    # One word of each kind, and a phrase its hover must contain.
+    hlsl_source = "\n".join([
+        "#define SCALE 2",
+        "groupshared float cache[64];",
+        "Texture2D _Tex; SamplerState sampler_Tex;",
+        "struct V { float3 n : NORMAL; // object-space normal",
+        "};",
+        "// Scales the input.",
+        "float3x3 Scale(half3 v) { return 0; }",
+        "[numthreads(8, 8, 1)] void Kernel(uint3 id : SV_DispatchThreadID) {",
+        "  float4 c = _Tex.SampleLevel(sampler_Tex, float2(0, 0), 0) + WaveActiveSum(1);",
+        "  [unroll] for (int i = 0; i < 2; ++i) {}",
+        "}",
+        "float4 frag(float2 uv : TEXCOORD0) : SV_Target { return 0; }",
+    ])
+    hlsl_uri = uri_for(FIXTURES / "unsaved_hover.hlsl")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": hlsl_uri, "languageId": "hlsl", "version": 1, "text": hlsl_source}})
+    hlsl_lines = hlsl_source.split("\n")
+
+    def hover_text(uri, lines, needle, skip=0):
+        line = next(i for i, text in enumerate(lines) if needle in text)
+        position = {"line": line, "character": lines[line].index(needle) + skip + 1}
+        result = client.request("textDocument/hover", {"textDocument": {"uri": uri}, "position": position})
+        return result["contents"]["value"] if result else ""
+
+    for needle, expected, description in [
+        ("define", "Defines a macro", "a # directive"),
+        ("groupshared", "thread group", "an HLSL keyword"),
+        ("half3", "A vector of 3 `half` components", "a vector type"),
+        ("float3x3", "3 rows and 3 columns", "a matrix type"),
+        ("Texture2D", "A 2D texture", "a resource type"),
+        ("NORMAL", "vertex normal", "a semantic"),
+        ("TEXCOORD0", "UV channel", "a numbered semantic"),
+        ("SV_DispatchThreadID", "whole dispatch", "a system value"),
+        ("numthreads", "thread group", "an attribute"),
+        ("unroll", "Unrolls the loop", "a loop attribute"),
+        ("SampleLevel", "mip level `lod`", "a texture method"),
+        ("WaveActiveSum", "Shader Model 6.0", "a Shader Model 6 intrinsic"),
+        ("Scale(", "Scales the input.", "the comment above a function"),
+        ("n : NORMAL", "object-space normal", "the comment after a field"),
+    ]:
+        check(expected in hover_text(hlsl_uri, hlsl_lines, needle), f"hover describes {description}")
+
+    shaderlab_source = "\n".join([
+        'Shader "Legacy"',
+        "{",
+        '    Properties { _MainTex ("Texture", 2D) = "bump" {} }',
+        "    SubShader",
+        "    {",
+        "        Pass",
+        "        {",
+        "            Lighting Off",
+        "            Fog { Mode Off }",
+        "        }",
+        "    }",
+        "}",
+    ])
+    legacy_uri = uri_for(FIXTURES / "unsaved_legacy.shader")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": legacy_uri, "languageId": "shaderlab", "version": 1, "text": shaderlab_source}})
+    legacy_lines = shaderlab_source.split("\n")
+    for needle, skip, expected, description in [
+        ('"bump"', 1, "flat normal map", "a built-in texture default"),
+        ("Lighting", 0, "per-vertex lighting", "a legacy command"),
+        ("Mode", 0, "fog mode", "a command inside a legacy block"),
+    ]:
+        check(expected in hover_text(legacy_uri, legacy_lines, needle, skip), f"hover describes {description}")
 
     definition = client.request("textDocument/definition", {"textDocument": {"uri": valid_uri}, "position": {"line": 22, "character": 16}})
     check(definition is not None and definition["range"]["start"]["line"] == 8, "definition of [_Cull] goes to the property")

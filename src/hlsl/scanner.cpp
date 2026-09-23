@@ -180,6 +180,7 @@ namespace {
           if (text.size() > 200)
             text = text.substr(0, 200) + " ...";
           decl.detail = std::move(text);
+          decl.doc = docComment(hash, std::string_view::npos);
           out_.decls.push_back(std::move(decl));
         }
       }
@@ -202,7 +203,7 @@ namespace {
         if (depth == 0 && token.kind == TK::Ident && token.text == "CBUFFER_START" && k + 3 < tokens_.size() &&
             isPunct(tokens_[k + 1], '(') && tokens_[k + 2].kind == TK::Ident && isPunct(tokens_[k + 3], ')')) {
           const T &name = tokens_[k + 2];
-          addDecl(DeclKind::CBuffer, name, "cbuffer " + std::string(name.text), "");
+          addDecl(DeclKind::CBuffer, name, "cbuffer " + std::string(name.text), "", token.span.begin);
           macroCBuffer = std::string(name.text);
           statement.clear();
           k += 3;
@@ -263,7 +264,7 @@ namespace {
           statement.size() >= 2 && statement[1]->kind == TK::Ident) {
         bool isStruct = first.text == "struct";
         name = std::string(statement[1]->text);
-        addDecl(isStruct ? DeclKind::Struct : DeclKind::CBuffer, *statement[1], std::string(first.text) + " " + name, "");
+        addDecl(isStruct ? DeclKind::Struct : DeclKind::CBuffer, *statement[1], std::string(first.text) + " " + name, "", first.span.begin);
         return isStruct ? Frame::Struct : Frame::CBuffer;
       }
       int bracket = 0;
@@ -282,7 +283,7 @@ namespace {
           if (i >= start + 2 && statement[i - 1]->kind == TK::Ident) {
             const T &nameToken = *statement[i - 1];
             std::string detail = collapse(src_.substr(statement[start]->span.begin, brace.span.begin - statement[start]->span.begin));
-            addDecl(DeclKind::Function, nameToken, detail, "");
+            addDecl(DeclKind::Function, nameToken, detail, "", statement[0]->span.begin);
             name = std::string(nameToken.text);
             return Frame::Function;
           }
@@ -303,7 +304,7 @@ namespace {
         std::string_view macro = first.text;
         bool upper = std::all_of(macro.begin(), macro.end(), [](char c) { return !std::islower(static_cast<unsigned char>(c)); });
         if (upper) {
-          addDecl(DeclKind::Variable, *statement[2], collapse(src_.substr(first.span.begin, statement[3]->span.end - first.span.begin)), container);
+          addDecl(DeclKind::Variable, *statement[2], collapse(src_.substr(first.span.begin, statement[3]->span.end - first.span.begin)), container, first.span.begin, statement[3]->span.end);
         }
         return;
       }
@@ -334,7 +335,7 @@ namespace {
           continue;
         if (isPunct(*token, ',')) {
           if (candidate && identCount >= 1)
-            addDecl(kind, *candidate, detail, container);
+            addDecl(kind, *candidate, detail, container, statement.front()->span.begin, declEnd);
           candidate = nullptr;
           stopped = false;
           continue;
@@ -351,17 +352,96 @@ namespace {
         }
       }
       if (candidate && identCount >= 2)
-        addDecl(kind, *candidate, detail, container);
+        addDecl(kind, *candidate, detail, container, statement.front()->span.begin, declEnd);
     }
-    void addDecl(DeclKind kind, const T &name, std::string detail, std::string container) {
+    // `begin` is where the declaration starts, and `end` where it ends if a comment after it on the same line should
+    // count too.
+    void addDecl(DeclKind kind, const T &name, std::string detail, std::string container, size_t begin, size_t end = std::string_view::npos) {
       HlslDecl decl;
       decl.kind = kind;
       decl.name = std::string(name.text);
       decl.nameSpan = name.span;
       decl.detail = std::move(detail);
       decl.container = std::move(container);
+      decl.doc = docComment(begin, end);
       out_.decls.push_back(std::move(decl));
     }
+    // ---- documentation comments ---------------------------------------------
+    // The comment that documents a declaration: the // lines or the /* */ block directly above the line it starts on,
+    // with nothing between them, or else a // comment after it on its last line. This is how Unity documents its
+    // include files.
+    std::string docComment(size_t begin, size_t end) const {
+      size_t floor = range_.begin;
+      size_t lineStart = begin;
+      while (lineStart > floor && src_[lineStart - 1] != '\n')
+        --lineStart;
+      std::vector<std::string> lines; // bottom-up
+      if (trim(src_.substr(lineStart, begin - lineStart)).empty()) {
+        size_t pos = lineStart;
+        while (pos > floor && lines.size() < kMaxDocLines) {
+          size_t prevEnd = pos - 1; // the '\n' ending the line above
+          size_t prevStart = prevEnd;
+          while (prevStart > floor && src_[prevStart - 1] != '\n')
+            --prevStart;
+          std::string_view line = trim(src_.substr(prevStart, prevEnd - prevStart));
+          if (line.starts_with("//")) {
+            lines.emplace_back(commentText(line));
+            pos = prevStart;
+            continue;
+          }
+          if (line.ends_with("*/") && lines.empty()) {
+            size_t close = prevStart + src_.substr(prevStart, prevEnd - prevStart).rfind("*/");
+            size_t open = src_.rfind("/*", close);
+            if (open != std::string_view::npos && open >= floor) {
+              std::string_view block = src_.substr(open + 2, close - open - 2);
+              std::vector<std::string> blockLines;
+              size_t at = 0;
+              while (at <= block.size()) {
+                size_t next = block.find('\n', at);
+                std::string_view part = block.substr(at, next == std::string_view::npos ? std::string_view::npos : next - at);
+                blockLines.emplace_back(commentText(trim(part)));
+                if (next == std::string_view::npos)
+                  break;
+                at = next + 1;
+              }
+              lines.assign(blockLines.rbegin(), blockLines.rend());
+            }
+          }
+          break;
+        }
+      }
+      std::reverse(lines.begin(), lines.end());
+      if (lines.empty() && end != std::string_view::npos) {
+        size_t lineEnd = src_.find('\n', end);
+        std::string_view rest = trim(src_.substr(end, lineEnd == std::string_view::npos ? std::string_view::npos : lineEnd - end));
+        while (!rest.empty() && (rest.front() == ';' || rest.front() == ','))
+          rest = trim(rest.substr(1));
+        if (rest.starts_with("//"))
+          lines.emplace_back(commentText(rest));
+      }
+      // Separator lines such as //----- say nothing; blank lines only matter between paragraphs.
+      std::erase_if(lines, [](const std::string &line) {
+        return !line.empty() && std::none_of(line.begin(), line.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)); });
+      });
+      while (!lines.empty() && lines.front().empty())
+        lines.erase(lines.begin());
+      while (!lines.empty() && lines.back().empty())
+        lines.pop_back();
+      std::string text;
+      for (const std::string &line : lines) {
+        if (!text.empty())
+          text += line.empty() ? "\n" : (text.back() == '\n' ? "\n" : "  \n");
+        text += line;
+      }
+      return text;
+    }
+    // A comment line without its markers: "// text", "/// text", "//! text" or " * text" in a block.
+    static std::string commentText(std::string_view line) {
+      while (!line.empty() && (line.front() == '/' || line.front() == '!' || line.front() == '*'))
+        line.remove_prefix(1);
+      return std::string(trim(line));
+    }
+    static constexpr size_t kMaxDocLines = 40;
     std::string_view src_;
     Span range_;
     std::vector<T> tokens_;

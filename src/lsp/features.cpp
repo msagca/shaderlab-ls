@@ -52,8 +52,17 @@ namespace {
   std::string valueMarkdown(const ref::Entry &entry) {
     return "**" + std::string(entry.name) + "** (" + std::string(entry.detail) + ")\n\n" + std::string(entry.doc);
   }
+  std::string typeMarkdown(const hlsl::TypeDoc &type) {
+    return "```hlsl\n" + type.detail + "\n```\n\n" + type.doc;
+  }
   std::string spanText(const Analysis &a, Span span) {
     return a.text.substr(span.begin, span.end - span.begin);
+  }
+  // The nearest character before `begin` on the same line that is not a space or tab; '\n' at the start of a line.
+  char charBefore(std::string_view text, size_t begin) {
+    while (begin > 0 && (text[begin - 1] == ' ' || text[begin - 1] == '\t'))
+      --begin;
+    return begin > 0 && text[begin - 1] != '\r' ? text[begin - 1] : '\n';
   }
   std::string propertyMarkdown(const Analysis &a, const MaterialProperty &property) {
     return "```shaderlab\n" + spanText(a, property.span) + "\n```\n\nMaterial property (" + property.type + ")";
@@ -177,6 +186,8 @@ namespace {
   }
   std::string declMarkdown(const HlslDecl &decl, std::string_view where = {}) {
     std::string text = "```hlsl\n" + decl.detail + "\n```";
+    if (!decl.doc.empty())
+      text += "\n\n" + decl.doc;
     if (!decl.container.empty())
       text += "\n\nIn `" + decl.container + "`";
     if (!where.empty())
@@ -331,12 +342,15 @@ namespace {
         items.add(property.name, kItemProperty, "Material property (" + property.type + ")", propertyMarkdown(a, property));
       }
     }
-    for (const std::string &keyword : hlsl::keywords())
-      items.add(keyword, kItemKeyword);
-    for (const std::string &type : hlsl::types())
-      items.add(type, kItemClass);
-    for (const std::string &function : hlsl::intrinsics())
-      items.add(function, kItemFunction, "HLSL intrinsic function");
+    for (const ref::Entry &keyword : hlsl::keywords())
+      items.add(std::string(keyword.name), kItemKeyword, {}, entryMarkdown(keyword, "hlsl"));
+    for (const std::string &type : hlsl::types()) {
+      auto doc = hlsl::describeType(type);
+      items.add(type, kItemClass, {}, doc ? typeMarkdown(*doc) : std::string());
+    }
+    // Everything goes in the documentation, for the client's side window; the list itself shows just the name.
+    for (const ref::Entry &function : hlsl::intrinsics())
+      items.add(std::string(function.name), kItemFunction, {}, entryMarkdown(function, "hlsl"));
     for (const auto &file : includedFiles(a, units, context)) {
       std::string where = file->path.filename().string();
       for (const HlslDecl &decl : file->scan.decls)
@@ -526,6 +540,15 @@ namespace {
       }
       if (inside(property.nameSpan, offset))
         return hoverResult(a, property.nameSpan, propertyMarkdown(a, property), context);
+      // A built-in texture named as a texture property's default: = "white" {}
+      bool texture = false;
+      for (std::string_view type : {"2D", "2DArray", "3D", "Cube", "CubeArray", "Any"})
+        texture = texture || iequals(property.type, type);
+      if (texture && inside(property.span, offset) && offset > property.typeSpan.end) {
+        Span word = wordAt(a.text, offset);
+        if (const ref::Entry *entry = ref::find(ref::textureDefaults(), spanText(a, word)))
+          return hoverResult(a, word, valueMarkdown(*entry), context);
+      }
     }
     for (auto [command, stencilField] : allCommands(shader)) {
       if (inside(command->nameSpan, offset)) {
@@ -594,6 +617,15 @@ namespace {
     }
     if (const ref::Entry *entry = ref::findKeywordAnywhere(name))
       return hoverResult(a, word, entryMarkdown(*entry), context);
+    // Legacy fixed-function commands are skipped by the parser, so they are recognised where they stand: first on
+    // their line or just inside a block, as in Fog { Mode Off }.
+    char before = charBefore(a.text, word.begin);
+    if (before == '\n' || before == '{') {
+      if (const ref::Entry *entry = ref::find(ref::legacyCommands(), name))
+        return hoverResult(a, word, entryMarkdown(*entry), context);
+      if (const ref::Entry *entry = ref::find(ref::legacySubCommands(), name))
+        return hoverResult(a, word, entryMarkdown(*entry), context);
+    }
     return nullptr;
   }
   const HlslPragma *pragmaAt(const Analysis &a, size_t unit, size_t offset) {
@@ -654,17 +686,39 @@ namespace {
     if (word.empty())
       return nullptr;
     std::string name = spanText(a, word);
-    if (const HlslDecl *decl = findLocalDecl(a, units, name))
+    // What comes before the word tells a directive (#if), an attribute ([unroll]) and a semantic (: SV_Target) apart
+    // from an identifier of the same name.
+    char before = charBefore(a.text, word.begin);
+    if (before == '#') {
+      if (const ref::Entry *entry = ref::find(ref::preprocessorDirectives(), name))
+        return hoverResult(a, word, entryMarkdown(*entry, "hlsl"), context);
+    }
+    if (before == ':') {
+      if (const ref::Entry *entry = hlsl::findSemantic(name))
+        return hoverResult(a, word, entryMarkdown(*entry, "hlsl"), context);
+    }
+    const HlslDecl *decl = findLocalDecl(a, units, name);
+    if (before == '[' && !decl) {
+      if (const ref::Entry *entry = hlsl::findAttribute(name))
+        return hoverResult(a, word, entryMarkdown(*entry, "hlsl"), context);
+    }
+    if (decl)
       return hoverResult(a, word, declMarkdown(*decl), context);
     if (a.kind == DocumentKind::ShaderLab) {
       if (const MaterialProperty *property = a.shader.findProperty(name)) {
         return hoverResult(a, word, propertyMarkdown(a, *property), context);
       }
     }
-    if (hlsl::isIntrinsic(name))
-      return hoverResult(a, word, "```hlsl\n" + name + "\n```\n\nHLSL intrinsic function", context);
-    if (hlsl::isKeywordOrType(name))
-      return nullptr;
+    if (before == '.') {
+      if (const ref::Entry *method = hlsl::findMethod(name))
+        return hoverResult(a, word, entryMarkdown(*method, "hlsl"), context);
+    }
+    if (const ref::Entry *intrinsic = hlsl::findIntrinsic(name))
+      return hoverResult(a, word, entryMarkdown(*intrinsic, "hlsl"), context);
+    if (const ref::Entry *keyword = hlsl::findKeyword(name))
+      return hoverResult(a, word, entryMarkdown(*keyword, "hlsl"), context);
+    if (auto type = hlsl::describeType(name))
+      return hoverResult(a, word, typeMarkdown(*type), context);
     if (auto external = findExternalDecl(includedFiles(a, units, context), name)) {
       return hoverResult(a, word, declMarkdown(*external->decl, displayPath(external->file->path)), context);
     }
