@@ -216,13 +216,15 @@ def main():
         print(f"no server at {server}")
         return 2
 
+    # 77 rather than 2: nothing is wrong with the tests or the server, there is only nothing to run them with, and
+    # ctest reports this exit code as a skip.
     version = nvim_version()
     if version is None:
         print("no nvim on PATH: these tests drive Neovim, so they need it installed")
-        return 2
+        return 77
     if version < (0, 12):
         print(f"nvim {version[0]}.{version[1]} is too old: the plugin needs 0.12 or newer")
-        return 2
+        return 77
     print(f"nvim {version[0]}.{version[1]}, server {server.name}")
 
     print("\nfiletypes")

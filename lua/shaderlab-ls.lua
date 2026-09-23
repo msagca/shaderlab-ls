@@ -54,7 +54,7 @@ vim.api.nvim_create_user_command('ShaderlabLsBuildLog', function()
   vim.bo.modifiable = false
 end, { desc = 'Open the last shaderlab-ls build log' })
 
--- Both streams, always, and kept on disk. cmake, ninja and the compilers write most of what went wrong to stdout,
+-- Both streams, always, and kept on disk. cmake, the build tool and the compilers write most of what went wrong to stdout,
 -- so reporting result.stderr alone reported almost nothing: a failed build looked like a silent one.
 local function report(result)
   local lines = {}
@@ -67,7 +67,8 @@ local function report(result)
     vim.notify 'shaderlab-ls built'
     return
   end
-  -- Ninja stops at the first failure and prints it last, so the end of the output is the error itself.
+  -- Ninja stops at the first failure and prints it last, and MSBuild ends on a summary of the errors, so the end of
+  -- the output is the error itself.
   local tail = {}
   for i = #lines, 1, -1 do
     if lines[i]:match '%S' then

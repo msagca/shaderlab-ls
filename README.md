@@ -107,9 +107,9 @@ the image it is built on, currently glibc 2.39 and libstdc++ from GCC 13, or new
 
 ## Build
 
-The server can equally be built on the machine that runs it. It needs CMake 3.25+, Ninja and a C++20 compiler —
-Visual Studio with the C++ workload and a Windows 10/11 SDK (for `d3dcompiler.h`) on Windows, any recent GCC or
-Clang on Linux; `nlohmann/json` is fetched at configure time.
+The server can equally be built on the machine that runs it. It needs CMake 3.25+ and a C++20 compiler — Visual
+Studio with the C++ workload and a Windows 10/11 SDK (for `d3dcompiler.h`) on Windows, any recent GCC or Clang on
+Linux; `nlohmann/json` is fetched at configure time.
 [CI](.github/workflows/build.yml) builds and tests it on both on every push and keeps each build as an artifact.
 
 ```
@@ -117,20 +117,27 @@ build.cmd            :: Release build in .\build; build.cmd Debug for a debug on
 ./build.sh           # the same on Linux
 ```
 
+Both scripts use the `Release` and `Debug` presets in `CMakePresets.json`, which IDEs pick up too; `cmake --preset
+Release` then `cmake --build --preset Release` does the same by hand. The generator and the compiler are CMake's
+defaults — Visual Studio and MSVC on Windows — and `CMAKE_GENERATOR`, `CC` and `CXX` choose others as usual. Whatever
+the generator, the executable ends up in `build/`.
+
 The tests need Python 3, and the formatting ones clang-format on `PATH`. They compile HLSL with whatever the server
 finds; the `use_dxc` check needs a DXC, so set `SHADERLAB_LS_TEST_DXC` or have a Unity editor installed on Windows.
+There are three suites — `lsp`, `fuzz` and `plugin` — and ctest runs them against the executable in `build/`:
 
 ```
-python tests\run_tests.py build\shaderlab-ls.exe
-python tests\fuzz.py build\shaderlab-ls.exe 300
-python tests\run_plugin_tests.py build\shaderlab-ls.exe
+ctest --preset Release                                :: all three
+ctest --preset Release -LE slow                       :: all but the fuzzing
+python tests\fuzz.py build\shaderlab-ls.exe 300       :: any one by hand, here fuzzing for longer
 ```
 
-The last of those tests the [Neovim plugin](#neovim) rather than the server: the filetypes it claims, and the
-providing of the executable — when a build is started, what serves a buffer while one runs, and what happens to
-that buffer when it lands. It needs Neovim 0.12 or newer on `PATH`. Each case runs in its own headless Neovim
-against a throwaway checkout whose build script stands in for cmake, so nothing is compiled; downloading a release
-is the one path left untested, wanting the network. [CI](.github/workflows/build.yml) runs all three on every push.
+`plugin` tests the [Neovim plugin](#neovim) rather than the server: the filetypes it claims, and the providing of
+the executable — when a build is started, what serves a buffer while one runs, and what happens to that buffer when
+it lands. It needs Neovim 0.12 or newer on `PATH`, and is reported skipped without one. Each case runs in its own
+headless Neovim against a throwaway checkout whose build script stands in for cmake, so nothing is compiled;
+downloading a release is the one path left untested, wanting the network. [CI](.github/workflows/build.yml) runs all
+three on every push.
 
 ### Releasing
 
@@ -194,9 +201,9 @@ the executable in `build/` is missing or older than the sources, it fetches the 
 version, checks it against that release's `SHA256SUMS`, and unpacks it there. Nothing to install and nothing to
 configure — the two lines above are the whole setup, on Windows and Linux x86-64.
 
-Anywhere else, and whenever a download cannot be had, it builds the checkout instead, which needs CMake, Ninja
-and a C++ compiler. Both streams of a build go to a log that `:ShaderlabLsBuildLog` opens, and a failure reports
-the exit code with the last lines of it, which is where ninja leaves the error.
+Anywhere else, and whenever a download cannot be had, it builds the checkout instead, which needs CMake and a C++
+compiler. Both streams of a build go to a log that `:ShaderlabLsBuildLog` opens, and a failure reports
+the exit code with the last lines of it, which is where Ninja and MSBuild both leave the errors.
 
 The check runs just after startup, and again whenever `PackChanged` announces this plugin: an install or an update
 is met by the download or the build there and then, in the background, with no shader open and nothing waiting on

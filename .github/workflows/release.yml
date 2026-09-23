@@ -45,15 +45,9 @@ jobs:
           fi
           echo "VERSION=v${version}" >> "$GITHUB_ENV"
 
-      - name: Install Ninja (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq ninja-build
-
       - name: Build (Linux)
         if: runner.os == 'Linux'
-        run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
+        run: sh build.sh Release
 
       - name: Build (Windows)
         if: runner.os == 'Windows'

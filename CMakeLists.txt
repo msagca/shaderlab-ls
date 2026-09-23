@@ -50,6 +50,10 @@ add_executable(shaderlab-ls
   src/analysis/hlsl_check.cpp
 )
 
+# The executable goes straight into build/ whatever the generator: a multi-config one, such as Visual Studio, would otherwise put it in build/Release/,
+# and the plugin, the workflows and the tests all look for it in build/.
+set_target_properties(shaderlab-ls PROPERTIES RUNTIME_OUTPUT_DIRECTORY $<1:${CMAKE_BINARY_DIR}>)
+
 target_include_directories(shaderlab-ls PRIVATE src)
 target_include_directories(shaderlab-ls SYSTEM PRIVATE ${DXC_INCLUDE})
 target_link_libraries(shaderlab-ls PRIVATE nlohmann_json::nlohmann_json ${CMAKE_DL_LIBS})
@@ -72,6 +76,12 @@ endif()
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
-  add_test(NAME lsp
-    COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/run_tests.py $<TARGET_FILE:shaderlab-ls>)
+  set(tests ${CMAKE_SOURCE_DIR}/tests)
+  add_test(NAME lsp COMMAND Python3::Interpreter ${tests}/run_tests.py $<TARGET_FILE:shaderlab-ls>)
+  add_test(NAME fuzz COMMAND Python3::Interpreter ${tests}/fuzz.py $<TARGET_FILE:shaderlab-ls> 50)
+  set_tests_properties(fuzz PROPERTIES ENVIRONMENT FUZZ_COMPILE=1 LABELS slow)
+  # Skipped rather than failed where there is no Neovim 0.12+ to drive. Run alone: its fake builds wait for fixed
+  # intervals to be observed mid-run, which the other suites' compilers could stretch.
+  add_test(NAME plugin COMMAND Python3::Interpreter ${tests}/run_plugin_tests.py $<TARGET_FILE:shaderlab-ls>)
+  set_tests_properties(plugin PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL ON)
 endif()

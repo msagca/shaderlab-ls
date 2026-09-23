@@ -30,7 +30,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ninja-build clang-format
+          sudo apt-get install -y -qq clang-format
           # There is no FXC on Linux: HLSL compiles with DXC, installed the way a user would, on the library path.
           mkdir -p "$RUNNER_TEMP/dxc"
           curl -sfL https://github.com/microsoft/DirectXShaderCompiler/releases/download/v1.9.2602.24/linux_dxc_2026_05_26.x86_64.tar.gz \
@@ -56,16 +56,6 @@ jobs:
         if: runner.os == 'Linux'
         run: sh build.sh Release
 
-      - name: Test
-        run: python tests/run_tests.py "$EXE"
-        shell: bash
-
-      - name: Fuzz
-        run: python tests/fuzz.py "$EXE" 50
-        shell: bash
-        env:
-          FUZZ_COMPILE: '1'
-
       # The plugin tests drive Neovim itself, so they need one installed. The stable tag rather than a pinned
       # version: what the plugin has to keep working with is whatever Neovim tells people to run.
       - name: Install Neovim (Linux)
@@ -83,8 +73,12 @@ jobs:
           Expand-Archive $zip -DestinationPath $env:RUNNER_TEMP
           Join-Path $env:RUNNER_TEMP 'nvim-win64/bin' >> $env:GITHUB_PATH
 
-      - name: Test the plugin
-        run: python tests/run_plugin_tests.py "$EXE"
+      # The server's tests, the fuzzing and the plugin's tests, as CMakeLists.txt registers them. ctest passes a run
+      # with a skipped test, but Neovim is installed above, so a skip here means it went missing: fail instead.
+      - name: Test
+        run: |
+          ctest --preset Release --no-tests=error | tee "$RUNNER_TEMP/ctest.log"
+          ! grep -q 'did not run' "$RUNNER_TEMP/ctest.log"
         shell: bash
 
       - uses: actions/upload-artifact@v7

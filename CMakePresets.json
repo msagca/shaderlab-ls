@@ -1,0 +1,53 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 25, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "Base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": { "CMAKE_EXPORT_COMPILE_COMMANDS": "ON" }
+    },
+    {
+      "name": "Release",
+      "inherits": "Base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "Debug",
+      "inherits": "Base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "Release", "configurePreset": "Release", "configuration": "Release" },
+    { "name": "Debug", "configurePreset": "Debug", "configuration": "Debug" }
+  ],
+  "testPresets": [
+    {
+      "name": "Base",
+      "hidden": true,
+      "output": { "outputOnFailure": true }
+    },
+    { "name": "Release", "inherits": "Base", "configurePreset": "Release", "configuration": "Release" },
+    { "name": "Debug", "inherits": "Base", "configurePreset": "Debug", "configuration": "Debug" }
+  ],
+  "workflowPresets": [
+    {
+      "name": "Release",
+      "steps": [
+        { "type": "configure", "name": "Release" },
+        { "type": "build", "name": "Release" },
+        { "type": "test", "name": "Release" }
+      ]
+    },
+    {
+      "name": "Debug",
+      "steps": [
+        { "type": "configure", "name": "Debug" },
+        { "type": "build", "name": "Debug" },
+        { "type": "test", "name": "Debug" }
+      ]
+    }
+  ]
+}
