@@ -1,7 +1,11 @@
 name: build
 
 on:
+  # Branches only: a tag push is release.yml's, which builds and tests the tagged commit itself, and that commit was
+  # already built here when its branch was pushed. Naming branches is what leaves tags out; tags-ignore alone would
+  # leave out every branch instead.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 

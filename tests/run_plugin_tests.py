@@ -106,7 +106,8 @@ def fixture_for(case, server, stale=None, fail=False):
     windows = sys.platform == "win32"
     exe_name = "shaderlab-ls.exe" if windows else "shaderlab-ls"
 
-    for part in ("lua/shaderlab-ls.lua", "lua/shaderlab-ls/glsl.lua", "lsp/shaderlab_ls.lua", "plugin/shaderlab-ls.lua"):
+    for part in ("lua/shaderlab-ls.lua", "lua/shaderlab-ls/glsl.lua", "lua/shaderlab-ls/health.lua",
+                 "lsp/shaderlab_ls.lua", "plugin/shaderlab-ls.lua"):
         target = fixture / part
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / part, target)
@@ -373,6 +374,20 @@ def main():
           "only the GLSL blocks are left, where they were")
     check(ranges == [[[5, 15], [7, 4]], [[8, 22], [8, 38]]],
           "and a GLSLPROGRAM in a comment or in HLSL opens none")
+
+    print("\n:checkhealth shaderlab-ls")
+    fixture = fixture_for("health", server, stale=False)
+    lines, stderr = run("health", fixture, timeout=60)
+    ran_cleanly(lines, stderr, "health")
+    report = [line[len("health "):] for line in lines if line.startswith("health ")]
+    check(not any("Failed to run healthcheck" in line for line in report), "the check runs")
+    check(all(any(line.startswith(section + " ~") for line in report)
+              for section in ("Neovim", "Server", "Formatting and compilers", "Filetypes", "GLSL blocks")),
+          "and reports every section")
+    check(any(re.search(r"OK shaderlab-ls \S+ \(built", line) for line in report), "the executable is found and runs")
+    check(any("OK current for this checkout" in line for line in report), "and is current")
+    check(any("OK *.shader: shaderlab" in line for line in report), "the filetypes are checked")
+    check(builds(lines) == 0, "and nothing is built by looking")
 
     print()
     if failures:

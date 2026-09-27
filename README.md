@@ -232,6 +232,10 @@ the other path to do the work:
 
 With both set, the plugin only reports, and falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
 
+`:checkhealth shaderlab-ls` reports on all of it: whether the config is enabled, which executable runs and whether
+it is current for the checkout, why the last download or build failed, whether clang-format and the compiler
+settings are usable, what the shader extensions map to, and which GLSL servers the `GLSLPROGRAM` blocks go to.
+
 The server keeps running while its replacement builds. Neither Windows nor Linux lets a linker write over a
 running executable, so the old one is moved aside first and put back if the build fails: a build that cannot
 succeed leaves exactly what was there before, and the server restarts onto the new executable when one lands.

@@ -256,15 +256,28 @@ local function start(bufnr, config)
   end
 end
 
+--- The GLSL servers a shader's GLSL blocks would be handed to: every config enabled for glsl whose executable is
+--- found, bar shaderlab-ls itself, which takes glsl buffers too and already has the shader. The second list is the
+--- enabled ones left out for want of an executable, for :checkhealth to name.
+--- @return vim.lsp.Config[] servers
+--- @return vim.lsp.Config[] missing
+function M.servers()
+  local servers, missing = {}, {}
+  if not vim.lsp.get_configs then return servers, missing end
+  for _, config in ipairs(vim.lsp.get_configs { enabled = true, filetype = 'glsl' }) do
+    if not vim.list_contains(config.filetypes, 'shaderlab') then
+      table.insert(runnable(config) and servers or missing, config)
+    end
+  end
+  return servers, missing
+end
+
 --- Attach every GLSL server the user has enabled to a ShaderLab buffer, if it has a GLSL block.
 --- @param bufnr integer
 function M.attach(bufnr)
-  if vim.g.shaderlab_ls_glsl == false or not vim.lsp.get_configs then return end
+  if vim.g.shaderlab_ls_glsl == false then return end
   if vim.bo[bufnr].buftype ~= '' or not has_glsl(bufnr) then return end
-  for _, config in ipairs(vim.lsp.get_configs { enabled = true, filetype = 'glsl' }) do
-    -- shaderlab-ls itself takes glsl buffers too, and it already has this one.
-    if not vim.list_contains(config.filetypes, 'shaderlab') and runnable(config) then start(bufnr, config) end
-  end
+  for _, config in ipairs(M.servers()) do start(bufnr, config) end
 end
 
 M._scan, M._mask = scan, mask  -- for the tests

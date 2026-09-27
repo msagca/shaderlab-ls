@@ -64,9 +64,11 @@ local function report(result)
   pcall(vim.fn.mkdir, vim.fs.dirname(log), 'p')
   pcall(vim.fn.writefile, lines, log)
   if result.code == 0 then
+    state.error = nil
     vim.notify 'shaderlab-ls built'
     return
   end
+  state.error = ('the build failed (exit %d)'):format(result.code)
   -- Ninja stops at the first failure and prints it last, and MSBuild ends on a summary of the errors, so the end of
   -- the output is the error itself.
   local tail = {}
@@ -254,12 +256,13 @@ local function provide()
   if vim.g.shaderlab_ls_download == false or not version or not asset_for(version) then
     if buildable then return build() end
     state.running = false
-    vim.notify('shaderlab-ls: the executable is out of date and neither downloading nor building is enabled',
-      vim.log.levels.WARN)
+    state.error = 'the executable is out of date and neither downloading nor building is enabled'
+    vim.notify('shaderlab-ls: ' .. state.error, vim.log.levels.WARN)
     return
   end
   download(version, function(ok, err)
     if ok then
+      state.error = nil
       vim.notify('shaderlab-ls: installed v' .. version)
       return finish()
     end
@@ -268,6 +271,7 @@ local function provide()
       return build()
     end
     state.running = false
+    state.error = err
     vim.notify('shaderlab-ls: ' .. err, vim.log.levels.ERROR)
   end)
 end
@@ -303,6 +307,25 @@ function M.executable()
   M.refresh()
   if mtime(built) then return built end
   return moved_images()[1] or 'shaderlab-ls'
+end
+
+--- What :checkhealth reports, read without providing anything: a health check that set a build off would be
+--- reporting on the state it had just changed.
+function M.status()
+  local release = installed_release()
+  return {
+    checkout = vim.uv.fs_stat(sources) ~= nil,
+    built = mtime(built) and built or nil,
+    moved = moved_images()[1],
+    current = current(),
+    version = release_version(),
+    release = release,
+    asset = release_version() and asset_for(release_version()) or nil,
+    running = state.running == true,
+    attempted = state.attempted == true,
+    error = state.error,
+    log = vim.uv.fs_stat(log) and log or nil,
+  }
 end
 
 return M

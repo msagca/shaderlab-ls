@@ -290,6 +290,15 @@ cases.glsl_mask = function()
   finish()
 end
 
+-- :checkhealth against a checkout whose executable is current: every section is reported, and none of it throws.
+-- The report is logged line by line for the runner to read.
+cases.health = function()
+  vim.lsp.enable 'shaderlab_ls'
+  vim.cmd 'checkhealth shaderlab-ls'
+  for _, line in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do log('health ' .. line) end
+  finish()
+end
+
 -- Cases run once startup is over, not while this file is being read: filetype detection and the fixture's own
 -- plugin file are both in place by then, as they are for anyone who opens a shader in an editor already running.
 -- It also puts the eager pass in plugin/shaderlab-ls.lua and the shader being opened in the order that matters,

@@ -9,9 +9,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 include(FetchContent)
+# An installed nlohmann_json (vcpkg, a distro package) is used when there is one, 3.12 or a later 3.x; the release
+# archive is downloaded only when there is not.
 FetchContent_Declare(
   nlohmann_json
   URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+  FIND_PACKAGE_ARGS 3.12
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
