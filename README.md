@@ -33,6 +33,12 @@ together.
 - **Completion, hover, go to definition and document symbols**, for ShaderLab keywords, commands, values, tags and
   pragmas, and for HLSL symbols — properties, entry points, `#include` paths, functions, structs, variables, macros
   — from the shader and everything it includes (URP/HDRP packages, `UnityCG.cginc`, ...).
+- **References, highlights and rename** within the document. A material property's uses are its declaration, its
+  `[_Prop]` references and the shader variables of that name in every pass, HLSL or GLSL; an `HLSLINCLUDE` symbol's,
+  every pass that sees it; a pass's own `vert`, only that pass, `#pragma vertex vert` included; a parameter or local,
+  only the function it is in. Renaming a texture property renames its `_ST`, `_TexelSize`, `_HDR` and `sampler`
+  variables with it. A rename is refused, with the reason, for names declared in an included file and for struct
+  members, which are matched by name only, and when the new name is already in use there.
 - **Formatting** of `.shader`, `.compute`, `.hlsl`, `.cginc`, `.hlslinc`, `.glsl` and `.glslinc` files, over LSP
   (`textDocument/formatting`) or the command line (`--format`).
 
@@ -322,8 +328,11 @@ no `never_use_dxc`, it builds Unity's Direct3D 12 program and runs DXC instead.
   apply: the pixel shader output semantic `COLOR`, which FXC accepts for `SV_Target`, is an error, for example. DXC
   also runs without the DXIL validator (`-Vd`), which would need `dxil.dll` next to it; the front end, where nearly
   all errors come from, runs in full.
-- Documents are synchronized in full on every change; references, rename, range formatting and semantic highlighting
-  are not implemented.
+- Documents are synchronized in full on every change; range formatting and semantic highlighting are not
+  implemented.
+- References and rename stay within the open document: nothing indexes the project, so a material property renamed
+  here keeps its old name in `.mat` files and C# scripts, and a symbol from an included file can't be renamed. Locals
+  are told apart by the function they are in, not by block scope.
 - clang-format reads the HLSL as C++, so a `.clang-format` with only a `Language: CSharp` section does not apply to
   it, and options that rewrite code rather than lay it out (`InsertBraces`, `RemoveSemicolon`, ...) apply to HLSL as
   they would to C++.

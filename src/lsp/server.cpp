@@ -79,6 +79,9 @@ int Server::run() {
     }
     try {
       dispatch(message);
+    } catch (const RequestRefused &e) {
+      if (message.contains("id"))
+        respondError(message["id"], kRequestFailed, e.what());
     } catch (const std::exception &e) {
       if (message.contains("id"))
         respondError(message["id"], kRequestFailed, e.what());
@@ -204,7 +207,9 @@ void Server::dispatch(const json &message) {
     return;
   }
   if (method == "textDocument/completion" || method == "textDocument/hover" || method == "textDocument/definition" ||
-      method == "textDocument/documentSymbol") {
+      method == "textDocument/documentSymbol" || method == "textDocument/references" ||
+      method == "textDocument/documentHighlight" || method == "textDocument/prepareRename" ||
+      method == "textDocument/rename") {
     std::string uri = params.at("textDocument").at("uri").get<std::string>();
     auto analysis = snapshot(uri);
     if (!analysis) {
@@ -231,6 +236,16 @@ void Server::dispatch(const json &message) {
       respond(id, hover(*analysis, offset, context));
     if (method == "textDocument/definition")
       respond(id, definition(*analysis, offset, context));
+    if (method == "textDocument/references") {
+      bool includeDeclaration = params.value("context", json::object()).value("includeDeclaration", true);
+      respond(id, references(*analysis, uri, offset, includeDeclaration, context));
+    }
+    if (method == "textDocument/documentHighlight")
+      respond(id, documentHighlights(*analysis, offset, context));
+    if (method == "textDocument/prepareRename")
+      respond(id, prepareRename(*analysis, offset, context));
+    if (method == "textDocument/rename")
+      respond(id, rename(*analysis, uri, offset, params.at("newName").get<std::string>(), context));
     return;
   }
   if (isRequest)
@@ -274,6 +289,9 @@ json Server::initialize(const json &params) {
         {"hoverProvider", true},
         {"definitionProvider", true},
         {"documentSymbolProvider", true},
+        {"referencesProvider", true},
+        {"documentHighlightProvider", true},
+        {"renameProvider", {{"prepareProvider", true}}},
         {"documentFormattingProvider", true},
       }},
     {"serverInfo", {{"name", "shaderlab-ls"}, {"version", SHADERLAB_LS_VERSION}}},

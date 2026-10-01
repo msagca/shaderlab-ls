@@ -765,6 +765,310 @@ namespace {
     }
     return children;
   }
+  // ---- references and rename ---------------------------------------------------
+  // An identifier in code. `item` numbers the top-level declarations of a unit — a function with its parameters and
+  // body, a statement at file scope, a directive line — and is the scope a name nothing declares is searched in.
+  struct Identifier {
+    Span span;
+    bool member = false; // follows '.': a struct member, a method or a swizzle
+    size_t item = 0;
+  };
+  // Every identifier in text[range], outside comments and strings. Unlike the declaration scan this reads directive
+  // lines too, so `#pragma vertex vert` and macro bodies count as uses; only #include paths are skipped.
+  std::vector<Identifier> identifiersIn(std::string_view text, Span range) {
+    std::vector<Identifier> result;
+    size_t i = range.begin;
+    size_t end = std::min(range.end, text.size());
+    int depth = 0;
+    size_t item = 0;
+    bool lineStart = true;
+    bool directive = false;
+    char last = 0;
+    while (i < end) {
+      char c = text[i];
+      if (c == '\n') {
+        size_t back = i;
+        while (back > range.begin && text[back - 1] == '\r')
+          --back;
+        if (directive && !(back > range.begin && text[back - 1] == '\\')) {
+          directive = false;
+          if (depth == 0)
+            ++item;
+        }
+        lineStart = true;
+        ++i;
+        continue;
+      }
+      if (std::isspace(static_cast<unsigned char>(c))) {
+        ++i;
+        continue;
+      }
+      if (c == '/' && i + 1 < end && text[i + 1] == '/') {
+        while (i < end && text[i] != '\n')
+          ++i;
+        continue;
+      }
+      if (c == '/' && i + 1 < end && text[i + 1] == '*') {
+        size_t close = text.find("*/", i + 2);
+        i = close == std::string_view::npos || close + 2 > end ? end : close + 2;
+        continue;
+      }
+      if (c == '#' && lineStart) {
+        lineStart = false;
+        directive = true;
+        if (depth == 0)
+          ++item;
+        size_t word = i + 1;
+        while (word < end && (text[word] == ' ' || text[word] == '\t'))
+          ++word;
+        if (text.substr(word, 7) == "include") {
+          while (i < end && text[i] != '\n')
+            ++i;
+          continue;
+        }
+        last = c;
+        ++i;
+        continue;
+      }
+      lineStart = false;
+      if (c == '"' || c == '\'') {
+        ++i;
+        while (i < end && text[i] != c && text[i] != '\n')
+          i += text[i] == '\\' ? 2 : 1;
+        i = std::min(i + 1, end);
+        last = '"';
+        continue;
+      }
+      if (std::isdigit(static_cast<unsigned char>(c))) {
+        while (i < end && (isIdentChar(text[i]) || text[i] == '.'))
+          ++i;
+        last = '0';
+        continue;
+      }
+      if (isIdentStart(c)) {
+        size_t begin = i;
+        while (i < end && isIdentChar(text[i]))
+          ++i;
+        result.push_back({{begin, i}, last == '.', item});
+        last = 'a';
+        continue;
+      }
+      if (!directive) {
+        if (c == '{') {
+          ++depth;
+        } else if (c == '}') {
+          if (depth > 0 && --depth == 0)
+            ++item;
+        } else if (c == ';' && depth == 0) {
+          ++item;
+        }
+      }
+      last = c;
+      ++i;
+    }
+    return result;
+  }
+  // Unity binds a texture property's scale/offset, texel size, HDR decode values and sampler by name, so renaming
+  // the texture renames these with it.
+  bool isTextureProperty(const MaterialProperty &property) {
+    static const char *const kTypes[] = {"2D", "3D", "Cube", "2DArray", "CubeArray", "Any"};
+    return std::any_of(std::begin(kTypes), std::end(kTypes), [&](const char *type) { return iequals(property.type, type); });
+  }
+  std::vector<std::pair<std::string, std::string>> textureCompanions(const std::string &from, const std::string &to) {
+    std::vector<std::pair<std::string, std::string>> result;
+    for (const char *suffix : {"_ST", "_TexelSize", "_HDR"})
+      result.emplace_back(from + suffix, to + suffix);
+    result.emplace_back("sampler" + from, "sampler" + to);
+    return result;
+  }
+  // The symbol at an offset and every place this document names it.
+  struct SymbolUses {
+    enum class Kind {
+      Property,
+      Global, // declared in this document
+      External, // declared in an included file
+      Member,
+      Local,
+    };
+    Kind kind = Kind::Global;
+    std::string name;
+    Span at; // the occurrence the request was made on
+    std::optional<Span> declaration;
+    std::vector<Span> spans; // in document order, the declaration among them
+    std::vector<size_t> units; // the code the symbol is visible in
+    std::optional<size_t> item; // Local only: the declaration it is local to
+    std::string refusal; // why it can't be renamed; empty when it can
+  };
+  bool isBuiltinName(std::string_view name) {
+    return hlsl::isKeywordOrType(name) || hlsl::findIntrinsic(name);
+  }
+  // The units that see code declared in `unit`: an include block is seen by itself, the other include blocks and
+  // the programs of its kind; a program block or an HLSL document only by itself.
+  std::vector<size_t> unitsSeeing(const Analysis &a, size_t unit) {
+    std::vector<size_t> result;
+    for (size_t i = 0; i < a.units.size(); ++i) {
+      if (a.isGlsl(i))
+        continue;
+      std::vector<size_t> visible = a.visibleUnits(i);
+      if (std::find(visible.begin(), visible.end(), unit) != visible.end())
+        result.push_back(i);
+    }
+    return result;
+  }
+  // `[_Prop]` in ShaderLab, outside Properties, where attributes are written the same way. From the tokens rather
+  // than the parsed commands, so the fixed-function commands the parser skips (`SetTexture [_MainTex]`) count too.
+  std::vector<std::pair<std::string, Span>> propertyRefs(const Analysis &a) {
+    std::vector<std::pair<std::string, Span>> result;
+    if (a.kind != DocumentKind::ShaderLab)
+      return result;
+    std::vector<Span> properties;
+    for (const Scope &scope : a.shader.scopes) {
+      if (scope.kind == ScopeKind::Properties)
+        properties.push_back(scope.span);
+    }
+    std::vector<Token> tokens = lexShaderLab(a.text);
+    for (size_t k = 0; k + 2 < tokens.size(); ++k) {
+      if (tokens[k].kind != Tok::LBracket || tokens[k + 1].kind != Tok::Ident || tokens[k + 2].kind != Tok::RBracket)
+        continue;
+      Span span = tokens[k + 1].span;
+      if (std::none_of(properties.begin(), properties.end(), [&](Span scope) { return inside(scope, span.begin); }))
+        result.emplace_back(std::string(tokens[k + 1].text), span);
+    }
+    return result;
+  }
+  void sortSpans(std::vector<Span> &spans) {
+    std::sort(spans.begin(), spans.end(), [](Span x, Span y) { return x.begin < y.begin; });
+    spans.erase(std::unique(spans.begin(), spans.end(), [](Span x, Span y) { return x.begin == y.begin; }), spans.end());
+  }
+  // A material property: its declaration, its `[_Prop]` references and the shader variables Unity binds it to, in
+  // GLSL blocks as well as HLSL ones.
+  SymbolUses propertyUses(const Analysis &a, const std::string &name, Span at) {
+    SymbolUses uses{SymbolUses::Kind::Property, name, at};
+    if (const MaterialProperty *property = a.shader.findProperty(name)) {
+      uses.declaration = property->nameSpan;
+      uses.spans.push_back(property->nameSpan);
+    }
+    for (const auto &[text, span] : propertyRefs(a)) {
+      if (text == name)
+        uses.spans.push_back(span);
+    }
+    for (size_t i = 0; i < a.units.size(); ++i) {
+      uses.units.push_back(i);
+      for (const Identifier &id : identifiersIn(a.text, a.units[i].range)) {
+        if (!id.member && spanText(a, id.span) == name)
+          uses.spans.push_back(id.span);
+      }
+    }
+    sortSpans(uses.spans);
+    return uses;
+  }
+  std::optional<SymbolUses> symbolUses(const Analysis &a, size_t offset, const FeatureContext &context) {
+    auto unit = a.unitAt(offset);
+    if (!unit) {
+      if (a.kind != DocumentKind::ShaderLab)
+        return std::nullopt;
+      for (const MaterialProperty &property : a.shader.properties) {
+        if (inside(property.nameSpan, offset))
+          return propertyUses(a, property.name, property.nameSpan);
+      }
+      for (const auto &[name, span] : propertyRefs(a)) {
+        if (inside(span, offset))
+          return propertyUses(a, name, span);
+      }
+      return std::nullopt;
+    }
+    std::vector<Identifier> ids = identifiersIn(a.text, a.units[*unit].range);
+    auto hit = std::find_if(ids.begin(), ids.end(), [&](const Identifier &id) { return inside(id.span, offset); });
+    if (hit == ids.end())
+      return std::nullopt;
+    std::string name = spanText(a, hit->span);
+    if (!hit->member && a.kind == DocumentKind::ShaderLab && a.shader.findProperty(name))
+      return propertyUses(a, name, hit->span);
+    if (a.isGlsl(*unit) || (!hit->member && isBuiltinName(name)))
+      return std::nullopt;
+    // The declaration this unit sees, its own first.
+    const HlslDecl *decl = nullptr;
+    size_t declUnit = *unit;
+    std::vector<size_t> visible = a.visibleUnits(*unit);
+    std::stable_partition(visible.begin(), visible.end(), [&](size_t v) { return v == *unit; });
+    for (size_t v : visible) {
+      std::vector<const HlslDecl *> candidates;
+      for (const HlslDecl &candidate : a.units[v].scan.decls) {
+        if (candidate.name == name)
+          candidates.push_back(&candidate);
+      }
+      if (const HlslDecl *best = bestDecl(candidates)) {
+        decl = best;
+        declUnit = v;
+        break;
+      }
+    }
+    SymbolUses uses{SymbolUses::Kind::Global, name, hit->span};
+    if (hit->member || (decl && decl->kind == DeclKind::Field)) {
+      uses.kind = SymbolUses::Kind::Member;
+      uses.units = decl ? unitsSeeing(a, declUnit) : visible;
+      for (size_t v : uses.units) {
+        for (const HlslDecl &field : a.units[v].scan.decls) {
+          if (field.kind == DeclKind::Field && field.name == name)
+            uses.spans.push_back(field.nameSpan);
+        }
+        for (const Identifier &id : identifiersIn(a.text, a.units[v].range)) {
+          if (id.member && spanText(a, id.span) == name)
+            uses.spans.push_back(id.span);
+        }
+      }
+      uses.refusal = "Struct members are matched by name alone, not by their struct's type, so renaming " + name +
+        " could also rename another struct's member or a swizzle.";
+      sortSpans(uses.spans);
+      return uses;
+    }
+    if (decl) {
+      uses.declaration = decl->nameSpan;
+      uses.units = unitsSeeing(a, declUnit);
+    } else if (auto external = findExternalDecl(includedFiles(a, visible, context), name)) {
+      uses.kind = SymbolUses::Kind::External;
+      for (size_t v = 0; v < a.units.size(); ++v) {
+        if (!a.isGlsl(v))
+          uses.units.push_back(v);
+      }
+      uses.refusal = name + " is declared in " + displayPath(external->file->path) + ", outside this document.";
+    } else {
+      // Nothing declares it at file scope: a parameter or a local, looked for in the declaration it is used in.
+      uses.kind = SymbolUses::Kind::Local;
+      uses.units = {*unit};
+      uses.item = hit->item;
+    }
+    for (size_t v : uses.units) {
+      for (const Identifier &id : v == *unit ? ids : identifiersIn(a.text, a.units[v].range)) {
+        if (!id.member && (!uses.item || id.item == *uses.item) && spanText(a, id.span) == name)
+          uses.spans.push_back(id.span);
+      }
+    }
+    sortSpans(uses.spans);
+    return uses;
+  }
+  // Whether `name` is already used where `uses` would be renamed: the new name would collide with it or shadow it.
+  bool nameInUse(const Analysis &a, const SymbolUses &uses, std::string_view name) {
+    if (uses.kind == SymbolUses::Kind::Property) {
+      if (a.shader.findProperty(name))
+        return true;
+      for (const auto &[text, span] : propertyRefs(a)) {
+        if (text == name)
+          return true;
+      }
+    }
+    for (size_t v : uses.units) {
+      for (const Identifier &id : identifiersIn(a.text, a.units[v].range)) {
+        if (!id.member && (!uses.item || id.item == *uses.item) && spanText(a, id.span) == name)
+          return true;
+      }
+      for (const HlslDecl &decl : a.units[v].scan.decls) {
+        if (decl.name == name && decl.kind != DeclKind::Field)
+          return true;
+      }
+    }
+    return false;
+  }
 } // namespace
 json toRange(std::string_view text, const LineIndex &lines, Span span, Encoding encoding) {
   Position start = lines.toPosition(text, span.begin, encoding);
@@ -904,5 +1208,71 @@ json documentSymbols(const Analysis &a, const FeatureContext &context) {
   }
   result.push_back(symbol(a, shader.name.empty() ? "Shader" : shader.name, "Shader", kSymClass, shader.span, shader.nameSpan.empty() ? shader.keyword : shader.nameSpan, children, context));
   return result;
+}
+json references(const Analysis &a, const std::string &uri, size_t offset, bool includeDeclaration, const FeatureContext &context) {
+  auto uses = symbolUses(a, offset, context);
+  if (!uses)
+    return nullptr;
+  json result = json::array();
+  for (Span span : uses->spans) {
+    if (includeDeclaration || !uses->declaration || span.begin != uses->declaration->begin)
+      result.push_back({{"uri", uri}, {"range", toRange(a.text, a.lines, span, context.encoding)}});
+  }
+  return result;
+}
+json documentHighlights(const Analysis &a, size_t offset, const FeatureContext &context) {
+  auto uses = symbolUses(a, offset, context);
+  if (!uses)
+    return nullptr;
+  constexpr int kRead = 2, kWrite = 3; // DocumentHighlightKind
+  json result = json::array();
+  for (Span span : uses->spans) {
+    bool declaration = uses->declaration && span.begin == uses->declaration->begin;
+    result.push_back({{"range", toRange(a.text, a.lines, span, context.encoding)}, {"kind", declaration ? kWrite : kRead}});
+  }
+  return result;
+}
+json prepareRename(const Analysis &a, size_t offset, const FeatureContext &context) {
+  auto uses = symbolUses(a, offset, context);
+  if (!uses)
+    return nullptr;
+  if (!uses->refusal.empty())
+    throw RequestRefused(uses->refusal);
+  return {{"range", toRange(a.text, a.lines, uses->at, context.encoding)}, {"placeholder", uses->name}};
+}
+json rename(const Analysis &a, const std::string &uri, size_t offset, const std::string &newName, const FeatureContext &context) {
+  auto uses = symbolUses(a, offset, context);
+  if (!uses)
+    throw RequestRefused("There is no symbol here to rename.");
+  if (!uses->refusal.empty())
+    throw RequestRefused(uses->refusal);
+  if (newName.empty() || !isIdentStart(newName[0]) || !std::all_of(newName.begin(), newName.end(), isIdentChar))
+    throw RequestRefused("'" + newName + "' is not a valid identifier.");
+  if (isBuiltinName(newName))
+    throw RequestRefused(newName + " is an HLSL keyword, type or intrinsic.");
+  json edits = json::array();
+  if (newName != uses->name) {
+    if (nameInUse(a, *uses, newName))
+      throw RequestRefused(newName + " is already in use here; renaming " + uses->name + " to it would change what the code means.");
+    auto edit = [&](Span span, const std::string &text) {
+      edits.push_back({{"range", toRange(a.text, a.lines, span, context.encoding)}, {"newText", text}});
+    };
+    for (Span span : uses->spans)
+      edit(span, newName);
+    const MaterialProperty *property = uses->kind == SymbolUses::Kind::Property ? a.shader.findProperty(uses->name) : nullptr;
+    if (property && isTextureProperty(*property)) {
+      auto companions = textureCompanions(uses->name, newName);
+      for (size_t v : uses->units) {
+        for (const Identifier &id : identifiersIn(a.text, a.units[v].range)) {
+          std::string text = spanText(a, id.span);
+          for (const auto &[from, to] : companions) {
+            if (!id.member && text == from)
+              edit(id.span, to);
+          }
+        }
+      }
+    }
+  }
+  return {{"changes", {{uri, std::move(edits)}}}};
 }
 } // namespace sls

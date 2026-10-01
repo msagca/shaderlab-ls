@@ -60,6 +60,13 @@ def main():
             client.request("textDocument/hover", params, timeout=10)
             client.request("textDocument/definition", params, timeout=10)
             client.request("textDocument/documentSymbol", {"textDocument": {"uri": uri}}, timeout=10)
+            client.request("textDocument/references", {**params, "context": {"includeDeclaration": True}}, timeout=10)
+            client.request("textDocument/documentHighlight", params, timeout=10)
+            try:
+                client.request("textDocument/rename", {**params, "newName": "_Renamed"}, timeout=10)
+            except AssertionError as error:
+                if "failed" not in str(error):  # a refused rename is an answer; a timeout is not
+                    raise
             try:
                 client.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": True}}, timeout=10)
             except AssertionError as error:

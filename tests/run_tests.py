@@ -165,7 +165,8 @@ def main():
     print("initialize")
     caps = init["capabilities"]
     check(caps["positionEncoding"] == "utf-16", "negotiates utf-16")
-    check(caps["hoverProvider"] and caps["definitionProvider"] and caps["documentSymbolProvider"], "advertises features")
+    check(caps["hoverProvider"] and caps["definitionProvider"] and caps["documentSymbolProvider"] and caps["referencesProvider"]
+          and caps["documentHighlightProvider"] and caps["renameProvider"]["prepareProvider"], "advertises features")
 
     print("errors.shader")
     errors = FIXTURES / "errors.shader"
@@ -492,6 +493,131 @@ def main():
     check(shader.get("name") == "Tests/Valid" and names[:3] == ["Properties", "HLSLINCLUDE", "SubShader"], "outline structure")
     passes = shader["children"][2]["children"] if len(names) >= 3 else []
     check(any(p["name"] == 'Pass "ForwardLit"' for p in passes), "pass names in outline")
+
+    print("references / highlights / rename")
+    refs_source = "\n".join([
+        'Shader "Tests/References"',
+        "{",
+        "    Properties",
+        "    {",
+        "        [HDR] _Color (\"Color\", Color) = (1, 1, 1, 1)",
+        "        _MainTex (\"Texture\", 2D) = \"white\" {}",
+        "        _Flag (\"Flag\", Float) = 0",
+        "    }",
+        "    HLSLINCLUDE",
+        "    float4 _Color;",
+        "    float Shared(float x) { return x * 2; }",
+        "    ENDHLSL",
+        "    SubShader",
+        "    {",
+        "        Cull [_Flag]",
+        "        Pass",
+        "        {",
+        "            SetTexture [_MainTex] { combine texture }",
+        "            HLSLPROGRAM",
+        "            #pragma vertex vert",
+        "            #pragma fragment frag",
+        "            struct Attributes { float4 position : POSITION; float2 uv : TEXCOORD0; };",
+        "            struct Varyings { float4 position : SV_POSITION; float2 uv : TEXCOORD0; };",
+        "            Texture2D _MainTex;",
+        "            SamplerState sampler_MainTex;",
+        "            float4 _MainTex_ST;",
+        "            Varyings vert(Attributes input)",
+        "            {",
+        "                Varyings output;",
+        "                output.position = input.position;",
+        "                output.uv = input.uv * _MainTex_ST.xy + _MainTex_ST.zw;",
+        "                return output;",
+        "            }",
+        "            float4 frag(Varyings input) : SV_Target",
+        "            {",
+        "                float4 color = _MainTex.Sample(sampler_MainTex, input.uv) * _Color;",
+        "                return color * Shared(1); // _Color in a comment",
+        "            }",
+        "            ENDHLSL",
+        "        }",
+        "        Pass",
+        "        {",
+        "            HLSLPROGRAM",
+        "            #pragma vertex vert",
+        "            #pragma fragment frag",
+        "            float4 vert() : SV_POSITION { float4 output = 0; return output * Shared(2); }",
+        "            float4 frag() : SV_Target { return _Color; }",
+        "            ENDHLSL",
+        "        }",
+        "    }",
+        "}",
+    ])
+    refs_uri = uri_for(FIXTURES / "unsaved_references.shader")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": refs_uri, "languageId": "shaderlab", "version": 1, "text": refs_source}})
+    refs_lines = refs_source.split("\n")
+
+    def at(needle, skip=0, line_has=None):
+        line = next(i for i, text in enumerate(refs_lines) if needle in text and (line_has is None or line_has in text))
+        return {"textDocument": {"uri": refs_uri}, "position": {"line": line, "character": refs_lines[line].index(needle) + skip}}
+
+    def found(result):
+        return sorted((r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in result or [])
+
+    def lines_of(result):
+        return sorted({r["range"]["start"]["line"] for r in result or []})
+
+    def references(position, include=True):
+        return client.request("textDocument/references", {**position, "context": {"includeDeclaration": include}})
+
+    def refused(method, params):
+        try:
+            client.request(method, params)
+        except AssertionError as error:
+            return str(error)
+        return ""
+
+    color = references(at("_Color", line_has="(\"Color\""))
+    check(lines_of(color) == [4, 9, 35, 46], "a property's references reach its variable in every pass, not a comment")
+    check(len(references(at("_Color", line_has="(\"Color\""), include=False)) == 3, "and leave its declaration out when asked")
+    check(lines_of(references(at("_MainTex", 1, "SetTexture"))) == [5, 17, 23, 35],
+          "from a [_MainTex] the parser skips, a texture's are found by its exact name")
+    check(lines_of(references(at("vertex vert", 7))) == [19, 26], "an entry point stays within its pass")
+    check(lines_of(references(at("Shared", line_has="Shared(2)"))) == [10, 36, 45], "an HLSLINCLUDE function is seen from both passes")
+    output = references(at("output", line_has="Varyings output"))
+    check(lines_of(output) == [28, 29, 30, 31] and len(output) == 4, "a local is found only in the function it is used in")
+    check(lines_of(references(at("uv", line_has="input.uv *"))) == [21, 22, 30, 35], "a member is found by name, in every struct")
+
+    highlights = client.request("textDocument/documentHighlight", at("_Flag", 1, "Cull"))
+    check(sorted((h["range"]["start"]["line"], h["kind"]) for h in highlights or []) == [(6, 3), (14, 2)],
+          "highlights mark the property's declaration as written and its uses as read")
+    check(client.request("textDocument/documentHighlight", at("float4", line_has="_Color;")) is None, "a type has no references")
+
+    prepared = client.request("textDocument/prepareRename", at("_MainTex", 1, "Texture2D"))
+    check(prepared is not None and prepared.get("placeholder") == "_MainTex", "prepareRename offers the name")
+    check("Struct members" in refused("textDocument/prepareRename", at("uv", line_has="input.uv *")), "a member can't be renamed")
+
+    def rename(position, new_name):
+        result = client.request("textDocument/rename", {**position, "newName": new_name})
+        return result["changes"][refs_uri]
+
+    def renamed(position, new_name):
+        source = refs_lines[:]
+        for edit in sorted(rename(position, new_name), key=lambda e: (-e["range"]["start"]["line"], -e["range"]["start"]["character"])):
+            start, end = edit["range"]["start"], edit["range"]["end"]
+            assert start["line"] == end["line"]
+            text = source[start["line"]]
+            source[start["line"]] = text[:start["character"]] + edit["newText"] + text[end["character"]:]
+        return source
+
+    texture = renamed(at("_MainTex", line_has="(\"Texture\""), "_BaseMap")
+    check(not any("_MainTex" in line for line in texture), "renaming a texture leaves no _MainTex behind")
+    check("SamplerState sampler_BaseMap;" in texture[24] and "_BaseMap_ST.zw" in texture[30] and "SetTexture [_BaseMap]" in texture[17],
+          "and takes its sampler, scale/offset and [references] with it")
+    local = renamed(at("output", line_has="output.position"), "result")
+    check(local[31].strip() == "return result;" and "float4 output = 0" in local[45], "renaming a local leaves the other pass alone")
+    check("return color * Twice(1);" in renamed(at("Shared", line_has="return x"), "Twice")[36], "renaming an HLSLINCLUDE function")
+    for new_name, fragment, description in [
+        ("_Flag", "already in use", "a name already in use"),
+        ("float3", "keyword, type or intrinsic", "a type name"),
+        ("2fast", "not a valid identifier", "an invalid identifier"),
+    ]:
+        check(fragment in refused("textDocument/rename", {**at("_Color", line_has="(\"Color\""), "newName": new_name}), f"rename refuses {description}")
 
     print("edits")
     client.notify("textDocument/didChange", {
