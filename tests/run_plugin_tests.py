@@ -107,7 +107,7 @@ def fixture_for(case, server, stale=None, fail=False):
     exe_name = "shaderlab-ls.exe" if windows else "shaderlab-ls"
 
     for part in ("lua/shaderlab-ls.lua", "lua/shaderlab-ls/glsl.lua", "lua/shaderlab-ls/health.lua",
-                 "lsp/shaderlab_ls.lua", "plugin/shaderlab-ls.lua"):
+                 "lsp/shaderlab_ls.lua", "plugin/shaderlab-ls.lua", "ftplugin/shaderlab.lua", "ftplugin/hlsl.lua"):
         target = fixture / part
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / part, target)
@@ -254,6 +254,8 @@ def main():
         ("support.glslinc", "glsl"),
     ):
         check(f"filetype {name} {expected}" in lines, f"{name} is {expected}")
+        # Neovim leaves 'commentstring' empty for the two filetypes it has no ftplugin of its own for; glsl it covers.
+        check(f"commentstring {name} // %s" in lines, f"gc comments {name} with //")
 
     print("\nan install, with nothing to run and no shader open")
     fixture = fixture_for("install", server)

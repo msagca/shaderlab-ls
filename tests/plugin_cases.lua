@@ -50,6 +50,7 @@ local function open(name)
   name = name or 'test.shader'
   vim.cmd.edit(vim.fn.fnameescape(vim.fs.joinpath(fixture, 'project', name)))
   log(('filetype %s %s'):format(name, vim.bo.filetype))
+  log(('commentstring %s %s'):format(name, vim.bo.commentstring))
 end
 
 local function built()

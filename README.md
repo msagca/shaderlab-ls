@@ -185,11 +185,12 @@ This repository is also the plugin: [`lsp/shaderlab_ls.lua`](lsp/shaderlab_ls.lu
 [`lua/shaderlab-ls.lua`](lua/shaderlab-ls.lua) provides the executable that config names, and
 [`plugin/shaderlab-ls.lua`](plugin/shaderlab-ls.lua) maps the filetypes and sets the providing off — Neovim has no
 `shaderlab` filetype of its own, detects neither `.hlsl` nor `.glslinc`, and gives `.shader` to Godot's `gdshader`, so
-the mapping claims `.shader` unless the file declares a `shader_type`. The server attaches to `glsl` buffers as well,
-but only to format them, so [glsl_analyzer](https://github.com/nolanderc/glsl_analyzer) can run alongside it for
-completion, hover, definitions and diagnostics. Formatting is the one thing both offer, and it is better left here:
-glsl_analyzer 1.7 does not parse the `precision` declarations that Unity's `GLSLSupport.glslinc` opens with — the file
-Unity includes in every `GLSLPROGRAM` snippet — and returns nothing for it.
+the mapping claims `.shader` unless the file declares a `shader_type`. Neovim has no ftplugin for `shaderlab` or `hlsl`
+either, so [`ftplugin/`](ftplugin) sets their `'commentstring'` to `// %s` for `gc`. The server attaches to `glsl`
+buffers as well, but only to format them, so [glsl_analyzer](https://github.com/nolanderc/glsl_analyzer) can run
+alongside it for completion, hover, definitions and diagnostics. Formatting is the one thing both offer, and it is
+better left here: glsl_analyzer 1.7 does not parse the `precision` declarations that Unity's `GLSLSupport.glslinc` opens
+with — the file Unity includes in every `GLSLPROGRAM` snippet — and returns nothing for it.
 
 The same GLSL server also covers the `GLSLPROGRAM` blocks of a `.shader`. Any config enabled for the `glsl`
 filetype whose executable is found gets a second client, named after it with ` (shaderlab)` appended, on each shader
@@ -251,6 +252,10 @@ executable on `PATH`, and map the filetypes yourself:
 vim.filetype.add {
   extension = { shader = 'shaderlab', hlsl = 'hlsl', compute = 'hlsl', cginc = 'hlsl', glslinc = 'glsl' },
 }
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = { 'shaderlab', 'hlsl' },
+  callback = function() vim.bo.commentstring = '// %s' end,  -- for gc, which ftplugin/ would otherwise set
+})
 vim.lsp.enable 'shaderlab_ls'
 ```
 
