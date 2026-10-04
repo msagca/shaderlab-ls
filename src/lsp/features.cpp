@@ -3,8 +3,11 @@
 #include <cctype>
 #include <deque>
 #include <set>
+#include <unordered_map>
 #include "common/util.h"
 #include "hlsl/builtins.h"
+#include "hlsl/lexer.h"
+#include "hlsl/scopes.h"
 #include "shaderlab/lexer.h"
 #include "shaderlab/reference.h"
 #include "unity/project.h"
@@ -14,6 +17,7 @@ namespace sls {
 namespace {
   // LSP CompletionItemKind
   enum ItemKind {
+    kItemMethod = 2,
     kItemFunction = 3,
     kItemField = 5,
     kItemVariable = 6,
@@ -88,36 +92,8 @@ namespace {
     const HlslDecl *decl;
   };
   std::vector<std::shared_ptr<const CachedFile>> includedFiles(const Analysis &a, const std::vector<size_t> &units, const FeatureContext &context) {
-    auto project = UnityProject::forFile(a.path, context.editorOverride);
-    std::vector<std::shared_ptr<const CachedFile>> files;
-    std::set<std::string> visited;
-    std::deque<std::pair<std::string, fs::path>> queue;
-    for (size_t unit : units) {
-      for (const HlslInclude &include : a.units[unit].scan.includes)
-        queue.emplace_back(include.path, a.path.parent_path());
-    }
-    if (a.kind == DocumentKind::ShaderLab) {
-      for (size_t unit : units) {
-        if (a.units[unit].block >= 0 && isCgBlock(a.shader.blocks[a.units[unit].block].kind)) {
-          queue.emplace_back("HLSLSupport.cginc", a.path.parent_path());
-          queue.emplace_back("UnityShaderVariables.cginc", a.path.parent_path());
-          break;
-        }
-      }
-    }
-    while (!queue.empty() && files.size() < 400) {
-      auto [name, dir] = queue.front();
-      queue.pop_front();
-      auto resolved = project->resolveInclude(name, dir);
-      if (!resolved || !visited.insert(pathKey(*resolved)).second)
-        continue;
-      auto file = loadCachedFile(*resolved);
-      if (!file)
-        continue;
-      for (const HlslInclude &include : file->scan.includes)
-        queue.emplace_back(include.path, resolved->parent_path());
-      files.push_back(std::move(file));
-    }
+    std::vector<std::shared_ptr<const CachedFile>> files = sls::includedFiles(a, units, context.editorOverride);
+    files.insert(files.end(), context.outer.begin(), context.outer.end());
     return files;
   }
   int declPriority(DeclKind kind) {
@@ -139,8 +115,10 @@ namespace {
   }
   const HlslDecl *bestDecl(const std::vector<const HlslDecl *> &candidates) {
     const HlslDecl *best = nullptr;
+    // One in code the variant compiles before one an #if leaves out, then by kind.
+    auto rank = [](const HlslDecl *decl) { return std::pair(!decl->active, declPriority(decl->kind)); };
     for (const HlslDecl *decl : candidates) {
-      if (!best || declPriority(decl->kind) < declPriority(best->kind))
+      if (!best || rank(decl) < rank(best))
         best = decl;
     }
     return best;
@@ -278,6 +256,389 @@ namespace {
       }
     }
   }
+  // ---- expression types, for members after '.' --------------------------------
+  // Enough of HLSL's types to say what follows a '.': the declared type of a parameter, local, global or field,
+  // read from its declaration, and what indexing, a swizzle or a method call makes of it. Lexical like the rest:
+  // a type hidden behind a macro other than Unity's texture macros is not seen through.
+  struct CodeToken {
+    enum Kind { Ident,
+      Number,
+      String,
+      Punct } kind;
+    Span span;
+  };
+  // The tokens of text[range], without comments and directive lines.
+  std::vector<CodeToken> codeTokens(std::string_view text, Span range) {
+    std::vector<CodeToken> result;
+    for (const HlslToken &token : lexHlsl(text, range)) {
+      switch (token.kind) {
+      case HlslTok::Ident:
+        result.push_back({CodeToken::Ident, token.span});
+        break;
+      case HlslTok::Number:
+        result.push_back({CodeToken::Number, token.span});
+        break;
+      case HlslTok::String:
+        result.push_back({CodeToken::String, token.span});
+        break;
+      case HlslTok::Punct:
+        result.push_back({CodeToken::Punct, token.span});
+        break;
+      default:
+        break;
+      }
+    }
+    return result;
+  }
+  struct TypeRef {
+    std::string name;
+    std::string element; // the template argument: Foo for StructuredBuffer<Foo>
+  };
+  // Unity's texture declaration macros, TEXTURE2D(_BaseMap) and the like, as the type they declare.
+  std::string canonicalType(std::string_view name) {
+    bool upper = !name.empty() && std::none_of(name.begin(), name.end(), [](char c) { return std::islower(static_cast<unsigned char>(c)); });
+    if (!upper)
+      return std::string(name);
+    auto has = [&](std::string_view part) { return name.find(part) != std::string_view::npos; };
+    std::string prefix = has("RW_") ? "RW" : "";
+    bool array = has("ARRAY");
+    if (has("TEXTURECUBE") || has("TEXCUBE"))
+      return prefix + (array ? "TextureCubeArray" : "TextureCube");
+    if (has("TEXTURE3D") || has("TEX3D"))
+      return prefix + "Texture3D";
+    if (has("TEXTURE2D") || has("TEX2D"))
+      return prefix + (array ? "Texture2DArray" : "Texture2D");
+    return std::string(name);
+  }
+  class TypeReader {
+  public:
+    TypeReader(std::string_view text, const std::vector<CodeToken> &tokens)
+      : text_(text), tokens_(tokens) {}
+    std::string_view str(size_t i) const {
+      return text_.substr(tokens_[i].span.begin, tokens_[i].span.end - tokens_[i].span.begin);
+    }
+    bool punct(size_t i, char c) const {
+      return i < tokens_.size() && tokens_[i].kind == CodeToken::Punct && text_[tokens_[i].span.begin] == c;
+    }
+    // The type declared before the name at tokens[k]: `float4 color`, `StructuredBuffer<Foo> buffer`, the `b` of
+    // `float a, b`, or Unity's `TEXTURE2D(_BaseMap)`.
+    std::optional<TypeRef> before(size_t k) const {
+      if (k == 0)
+        return std::nullopt;
+      size_t p = k - 1;
+      if (punct(p, ',')) {
+        // Back to the start of the declaration, past the names declared before this one.
+        int depth = 0;
+        while (p > 0) {
+          --p;
+          if (punct(p, ')') || punct(p, ']') || punct(p, '>'))
+            ++depth;
+          if (punct(p, '(') || punct(p, '[') || punct(p, '<')) {
+            if (depth == 0)
+              break;
+            --depth;
+          }
+          if (depth == 0 && (punct(p, ';') || punct(p, '{') || punct(p, '}')))
+            break;
+        }
+        size_t first = tokens_[p].kind == CodeToken::Ident && p == 0 ? 0 : p + 1;
+        while (first < k && tokens_[first].kind == CodeToken::Ident && hlsl::findKeyword(str(first)))
+          ++first;
+        return first < k && tokens_[first].kind == CodeToken::Ident ? at(first) : std::nullopt;
+      }
+      if (punct(p, '>')) {
+        int depth = 0;
+        for (size_t q = p + 1; q-- > 0;) {
+          if (punct(q, '>'))
+            ++depth;
+          if (punct(q, '<') && --depth == 0)
+            return q > 0 && tokens_[q - 1].kind == CodeToken::Ident ? at(q - 1) : std::nullopt;
+        }
+        return std::nullopt;
+      }
+      if (tokens_[p].kind == CodeToken::Ident)
+        return hlsl::findKeyword(str(p)) ? std::nullopt : at(p);
+      if (punct(p, '(') && p > 0 && tokens_[p - 1].kind == CodeToken::Ident && punct(k + 1, ')')) {
+        std::string macro = canonicalType(str(p - 1));
+        if (macro != str(p - 1))
+          return TypeRef{macro, {}};
+      }
+      return std::nullopt;
+    }
+    // The type named at tokens[i], with its template argument if one follows.
+    std::optional<TypeRef> at(size_t i) const {
+      TypeRef type{canonicalType(str(i)), {}};
+      if (punct(i + 1, '<')) {
+        size_t j = i + 2;
+        while (j < tokens_.size() && !punct(j, ',') && !punct(j, '>'))
+          ++j;
+        if (j > i + 2)
+          type.element = std::string(text_.substr(tokens_[i + 2].span.begin, tokens_[j - 1].span.end - tokens_[i + 2].span.begin));
+      }
+      return type;
+    }
+  private:
+    std::string_view text_;
+    const std::vector<CodeToken> &tokens_;
+  };
+  // The type a declaration's text gives `name`: "float4 _Color", "TEXTURE2D(_BaseMap)", "Varyings vert(...)".
+  std::optional<TypeRef> typeInDetail(std::string_view detail, std::string_view name) {
+    std::vector<CodeToken> tokens = codeTokens(detail, {0, detail.size()});
+    TypeReader reader(detail, tokens);
+    for (size_t k = 0; k < tokens.size(); ++k) {
+      if (tokens[k].kind == CodeToken::Ident && reader.str(k) == name)
+        return reader.before(k);
+    }
+    return std::nullopt;
+  }
+  // A '.' and what comes before it: `input.uv`, `_Lights[i].color`, `GetData().position`.
+  struct Segment {
+    std::string name;
+    int indexes = 0; // [i] after it
+    bool call = false; // (...) after it
+  };
+  std::optional<std::vector<Segment>> chainBefore(std::string_view text, size_t dot, size_t floor) {
+    std::vector<Segment> chain;
+    auto skipSpaces = [&](size_t p) {
+      while (p > floor && (text[p - 1] == ' ' || text[p - 1] == '\t'))
+        --p;
+      return p;
+    };
+    // The '(' or '[' that the ')' or ']' just before `p` closes.
+    auto opening = [&](size_t p, char open, char close) -> std::optional<size_t> {
+      int depth = 0;
+      while (p > floor) {
+        --p;
+        if (text[p] == close)
+          ++depth;
+        if (text[p] == open && --depth == 0)
+          return p;
+        if (text[p] == ';' || text[p] == '{' || text[p] == '}')
+          return std::nullopt;
+      }
+      return std::nullopt;
+    };
+    size_t pos = dot;
+    while (true) {
+      Segment segment;
+      size_t p = skipSpaces(pos);
+      while (p > floor && text[p - 1] == ']') {
+        auto open = opening(p, '[', ']');
+        if (!open)
+          return std::nullopt;
+        ++segment.indexes;
+        p = skipSpaces(*open);
+      }
+      if (p > floor && text[p - 1] == ')') {
+        auto open = opening(p, '(', ')');
+        if (!open)
+          return std::nullopt;
+        segment.call = true;
+        p = skipSpaces(*open);
+      }
+      size_t end = p;
+      while (p > floor && isIdentChar(text[p - 1]))
+        --p;
+      if (p == end || std::isdigit(static_cast<unsigned char>(text[p])))
+        return std::nullopt;
+      segment.name = std::string(text.substr(p, end - p));
+      chain.insert(chain.begin(), std::move(segment));
+      size_t q = skipSpaces(p);
+      if (q <= floor || text[q - 1] != '.')
+        return chain;
+      pos = q - 1;
+    }
+  }
+  struct FoundDecl {
+    const HlslDecl *decl;
+    std::shared_ptr<const CachedFile> file; // null for a declaration in the document itself
+    std::string where() const {
+      return file ? displayPath(file->path) : std::string();
+    }
+  };
+  class TypeResolver {
+  public:
+    TypeResolver(const Analysis &a, size_t unit, const FeatureContext &context)
+      : a_(a), unit_(unit), units_(a.visibleUnits(unit)), files_(includedFiles(a, units_, context)) {}
+    // The declaration of `name` among `kinds`, in this document before its includes.
+    std::optional<FoundDecl> find(std::string_view name, std::initializer_list<DeclKind> kinds, std::string_view container = {}) const {
+      auto matches = [&](const HlslDecl &decl) {
+        return decl.name == name && std::find(kinds.begin(), kinds.end(), decl.kind) != kinds.end() && (container.empty() || decl.container == container);
+      };
+      // Code the variant compiles first: a field an #if swaps for another is the one compiled.
+      for (bool active : {true, false}) {
+        for (size_t u : units_) {
+          for (const HlslDecl &decl : a_.units[u].scan.decls) {
+            if (decl.active == active && matches(decl))
+              return FoundDecl{&decl, nullptr};
+          }
+        }
+      }
+      for (const auto &file : files_) {
+        for (const HlslDecl &decl : file->scan.decls) {
+          if (matches(decl))
+            return FoundDecl{&decl, file};
+        }
+      }
+      return std::nullopt;
+    }
+    // The fields of a struct, from wherever it is declared.
+    std::vector<FoundDecl> fields(std::string_view structName) const {
+      std::vector<FoundDecl> result;
+      auto add = [&](const std::vector<HlslDecl> &decls, const std::shared_ptr<const CachedFile> &file) {
+        for (const HlslDecl &decl : decls) {
+          if (decl.kind == DeclKind::Field && decl.container == structName && decl.active)
+            result.push_back({&decl, file});
+        }
+      };
+      for (size_t u : units_)
+        add(a_.units[u].scan.decls, nullptr);
+      if (result.empty()) {
+        for (const auto &file : files_) {
+          add(file->scan.decls, file);
+          if (!result.empty())
+            break;
+        }
+      }
+      return result;
+    }
+    // The type of the expression that ends just before the '.' at `dot`.
+    std::optional<TypeRef> typeBefore(size_t dot) const {
+      auto chain = chainBefore(a_.text, dot, a_.units[unit_].range.begin);
+      if (!chain)
+        return std::nullopt;
+      std::optional<TypeRef> type = baseType(chain->front(), dot);
+      for (size_t i = 0; type && i < chain->size(); ++i) {
+        const Segment &segment = (*chain)[i];
+        if (i > 0)
+          type = member(*type, segment);
+        for (int k = 0; type && k < segment.indexes; ++k)
+          type = element(*type);
+      }
+      return type;
+    }
+    std::optional<TypeRef> member(const TypeRef &type, const Segment &segment) const {
+      if (segment.call) {
+        if (hlsl::methodsOf(type.name).empty())
+          return std::nullopt;
+        if (segment.name.starts_with("SampleCmp") || segment.name.starts_with("CalculateLevelOfDetail"))
+          return TypeRef{"float", {}};
+        if (segment.name.starts_with("Gather"))
+          return TypeRef{"float4", {}};
+        return TypeRef{type.element.empty() ? "float4" : type.element, {}};
+      }
+      if (auto shape = hlsl::numericShape(type.name)) {
+        if (shape->columns > 0)
+          return segment.name.starts_with("_") ? std::optional(TypeRef{shape->scalar, {}}) : std::nullopt;
+        size_t size = segment.name.size();
+        if (size > 4)
+          return std::nullopt;
+        return TypeRef{size == 1 ? shape->scalar : shape->scalar + std::to_string(size), {}};
+      }
+      if (auto field = find(segment.name, {DeclKind::Field}, type.name))
+        return typeInDetail(field->decl->detail, segment.name);
+      return std::nullopt;
+    }
+  private:
+    std::optional<TypeRef> baseType(const Segment &base, size_t dot) const {
+      if (base.call) {
+        if (hlsl::numericShape(base.name))
+          return TypeRef{base.name, {}}; // a constructor: float3(0, 0, 1)
+        if (auto function = find(base.name, {DeclKind::Function}))
+          return typeInDetail(function->decl->detail, base.name);
+        return std::nullopt;
+      }
+      if (auto local = localType(base.name, dot))
+        return local;
+      if (auto global = find(base.name, {DeclKind::Variable}))
+        return typeInDetail(global->decl->detail, base.name);
+      return std::nullopt;
+    }
+    // A parameter or local declared before `offset` in the top-level declaration it is in.
+    std::optional<TypeRef> localType(std::string_view name, size_t offset) const {
+      std::vector<CodeToken> tokens = codeTokens(a_.text, {a_.units[unit_].range.begin, offset});
+      TypeReader reader(a_.text, tokens);
+      size_t start = 0;
+      int depth = 0;
+      for (size_t i = 0; i < tokens.size(); ++i) {
+        if (reader.punct(i, '{'))
+          ++depth;
+        if (reader.punct(i, '}') && depth > 0 && --depth == 0)
+          start = i + 1;
+        if (reader.punct(i, ';') && depth == 0)
+          start = i + 1;
+      }
+      std::optional<TypeRef> found;
+      for (size_t k = start; k < tokens.size(); ++k) {
+        if (tokens[k].kind != CodeToken::Ident || reader.str(k) != name)
+          continue;
+        bool declarator = k + 1 < tokens.size() && (reader.punct(k + 1, ';') || reader.punct(k + 1, ',') || reader.punct(k + 1, '=') ||
+                                                      reader.punct(k + 1, ')') || reader.punct(k + 1, ':') || reader.punct(k + 1, '['));
+        if (!declarator)
+          continue;
+        if (auto type = reader.before(k))
+          found = type;
+      }
+      return found;
+    }
+    std::optional<TypeRef> element(const TypeRef &type) const {
+      if (!type.element.empty())
+        return TypeRef{type.element, {}};
+      if (auto shape = hlsl::numericShape(type.name)) {
+        if (shape->columns > 0)
+          return TypeRef{shape->scalar + std::to_string(shape->columns), {}};
+        return TypeRef{shape->scalar, {}};
+      }
+      if (!hlsl::methodsOf(type.name).empty())
+        return TypeRef{"float4", {}}; // Texture2D without <T> holds float4
+      return type; // an array
+    }
+    const Analysis &a_;
+    size_t unit_;
+    std::vector<size_t> units_;
+    std::vector<std::shared_ptr<const CachedFile>> files_;
+  };
+  void addMembers(Items &items, const TypeResolver &resolver, const TypeRef &type) {
+    if (auto shape = hlsl::numericShape(type.name)) {
+      if (shape->columns > 0) {
+        for (int r = 0; r < shape->rows; ++r) {
+          for (int c = 0; c < shape->columns; ++c)
+            items.add("_m" + std::to_string(r) + std::to_string(c), kItemField, shape->scalar, "Row " + std::to_string(r) + ", column " + std::to_string(c) + ".");
+        }
+        return;
+      }
+      // A scalar has an x too: 1.0.xxx is a float3.
+      int size = shape->rows;
+      for (std::string_view set : {"xyzw", "rgba"}) {
+        for (int i = 0; i < size; ++i)
+          items.add(std::string(1, set[i]), kItemField, shape->scalar);
+        for (int length = 2; length <= size; ++length)
+          items.add(std::string(set.substr(0, length)), kItemField, shape->scalar + std::to_string(length));
+      }
+      return;
+    }
+    for (const ref::Entry *method : hlsl::methodsOf(type.name))
+      items.add(std::string(method->name), kItemMethod, {}, entryMarkdown(*method, "hlsl"));
+    for (const FoundDecl &field : resolver.fields(type.name))
+      items.add(field.decl->name, kItemField, field.decl->detail, declMarkdown(*field.decl, field.where()));
+  }
+  // The '.' before `begin`, if there is one with only spaces between.
+  std::optional<size_t> dotBefore(std::string_view text, size_t begin, size_t floor) {
+    while (begin > floor && (text[begin - 1] == ' ' || text[begin - 1] == '\t'))
+      --begin;
+    return begin > floor && text[begin - 1] == '.' ? std::optional(begin - 1) : std::nullopt;
+  }
+  // The field a member access names, `uv` in `input.uv`, found through the type of what is before the '.'.
+  std::optional<FoundDecl> memberDecl(const Analysis &a, size_t unit, Span word, const FeatureContext &context) {
+    auto dot = dotBefore(a.text, word.begin, a.units[unit].range.begin);
+    if (!dot)
+      return std::nullopt;
+    TypeResolver resolver(a, unit, context);
+    auto type = resolver.typeBefore(*dot);
+    if (!type)
+      return std::nullopt;
+    return resolver.find(a.text.substr(word.begin, word.end - word.begin), {DeclKind::Field}, type->name);
+  }
   json hlslCompletion(const Analysis &a, size_t unit, size_t offset, const FeatureContext &context) {
     Items items(context);
     std::vector<size_t> units = a.visibleUnits(unit);
@@ -333,9 +694,25 @@ namespace {
       }
       return items.result();
     }
-    for (size_t u : units) {
-      for (const HlslDecl &decl : a.units[u].scan.decls)
-        addDecl(items, decl);
+    // After a '.', only the members of what is before it; nothing at all when its type can't be told, rather than
+    // every name in scope.
+    size_t wordStart = offset;
+    while (wordStart > a.units[unit].range.begin && isIdentChar(a.text[wordStart - 1]))
+      --wordStart;
+    if (wordStart > a.units[unit].range.begin && a.text[wordStart - 1] == '.') {
+      TypeResolver resolver(a, unit, context);
+      if (auto type = resolver.typeBefore(wordStart - 1))
+        addMembers(items, resolver, *type);
+      return items.result();
+    }
+    // What the variant compiles first, so that of two declarations of a name the one shown is the one compiled.
+    for (bool active : {true, false}) {
+      for (size_t u : units) {
+        for (const HlslDecl &decl : a.units[u].scan.decls) {
+          if (decl.active == active)
+            addDecl(items, decl);
+        }
+      }
     }
     if (a.kind == DocumentKind::ShaderLab) {
       for (const MaterialProperty &property : a.shader.properties) {
@@ -697,6 +1074,10 @@ namespace {
       if (const ref::Entry *entry = hlsl::findSemantic(name))
         return hoverResult(a, word, entryMarkdown(*entry, "hlsl"), context);
     }
+    if (before == '.') {
+      if (auto field = memberDecl(a, unit, word, context))
+        return hoverResult(a, word, declMarkdown(*field->decl, field->where()), context);
+    }
     const HlslDecl *decl = findLocalDecl(a, units, name);
     if (before == '[' && !decl) {
       if (const ref::Entry *entry = hlsl::findAttribute(name))
@@ -772,6 +1153,7 @@ namespace {
     Span span;
     bool member = false; // follows '.': a struct member, a method or a swizzle
     size_t item = 0;
+    std::optional<size_t> local; // where the parameter or local it names is declared, by block scope
   };
   // Every identifier in text[range], outside comments and strings. Unlike the declaration scan this reads directive
   // lines too, so `#pragma vertex vert` and macro bodies count as uses; only #include paths are skipped.
@@ -868,6 +1250,16 @@ namespace {
     }
     return result;
   }
+  // The identifiers of one unit, each with the parameter or local it names, if any.
+  std::vector<Identifier> unitIdentifiers(const Analysis &a, size_t unit) {
+    std::vector<Identifier> ids = identifiersIn(a.text, a.units[unit].range);
+    std::unordered_map<size_t, size_t> bindings = localBindings(a.text, a.units[unit].range);
+    for (Identifier &id : ids) {
+      if (auto it = bindings.find(id.span.begin); it != bindings.end() && !id.member)
+        id.local = it->second;
+    }
+    return ids;
+  }
   // Unity binds a texture property's scale/offset, texel size, HDR decode values and sampler by name, so renaming
   // the texture renames these with it.
   bool isTextureProperty(const MaterialProperty &property) {
@@ -898,6 +1290,9 @@ namespace {
     std::vector<size_t> units; // the code the symbol is visible in
     std::optional<size_t> item; // Local only: the declaration it is local to
     std::string refusal; // why it can't be renamed; empty when it can
+    // The include file declaring it, which every file including it may name it too: an External symbol's, a Global's
+    // in an include file, or the one that declares the shader variable a Property binds to.
+    std::optional<fs::path> declFile;
   };
   bool isBuiltinName(std::string_view name) {
     return hlsl::isKeywordOrType(name) || hlsl::findIntrinsic(name);
@@ -954,12 +1349,30 @@ namespace {
     }
     for (size_t i = 0; i < a.units.size(); ++i) {
       uses.units.push_back(i);
-      for (const Identifier &id : identifiersIn(a.text, a.units[i].range)) {
-        if (!id.member && spanText(a, id.span) == name)
+      for (const Identifier &id : unitIdentifiers(a, i)) {
+        if (!id.member && !id.local && spanText(a, id.span) == name)
           uses.spans.push_back(id.span);
       }
     }
     sortSpans(uses.spans);
+    return uses;
+  }
+  SymbolUses propertyUses(const Analysis &a, const std::string &name, Span at, const FeatureContext &context) {
+    SymbolUses uses = propertyUses(a, name, at);
+    // The variable it binds to, when an include file declares it rather than the shader.
+    std::vector<size_t> code;
+    bool declaredHere = false;
+    for (size_t i = 0; i < a.units.size(); ++i) {
+      if (a.isGlsl(i))
+        continue;
+      code.push_back(i);
+      for (const HlslDecl &decl : a.units[i].scan.decls)
+        declaredHere = declaredHere || (decl.name == name && decl.kind == DeclKind::Variable);
+    }
+    if (!declaredHere) {
+      if (auto external = findExternalDecl(includedFiles(a, code, context), name); external && external->decl->kind == DeclKind::Variable)
+        uses.declFile = external->file->path;
+    }
     return uses;
   }
   std::optional<SymbolUses> symbolUses(const Analysis &a, size_t offset, const FeatureContext &context) {
@@ -969,21 +1382,34 @@ namespace {
         return std::nullopt;
       for (const MaterialProperty &property : a.shader.properties) {
         if (inside(property.nameSpan, offset))
-          return propertyUses(a, property.name, property.nameSpan);
+          return propertyUses(a, property.name, property.nameSpan, context);
       }
       for (const auto &[name, span] : propertyRefs(a)) {
         if (inside(span, offset))
-          return propertyUses(a, name, span);
+          return propertyUses(a, name, span, context);
       }
       return std::nullopt;
     }
-    std::vector<Identifier> ids = identifiersIn(a.text, a.units[*unit].range);
+    std::vector<Identifier> ids = unitIdentifiers(a, *unit);
     auto hit = std::find_if(ids.begin(), ids.end(), [&](const Identifier &id) { return inside(id.span, offset); });
     if (hit == ids.end())
       return std::nullopt;
     std::string name = spanText(a, hit->span);
+    // A parameter or local: its declaration and the uses its block scope gives it, whatever else shares its name.
+    if (hit->local && !a.isGlsl(*unit)) {
+      SymbolUses uses{SymbolUses::Kind::Local, name, hit->span};
+      uses.units = {*unit};
+      uses.item = hit->item;
+      uses.declaration = Span{*hit->local, *hit->local + name.size()};
+      for (const Identifier &id : ids) {
+        if (id.local == hit->local)
+          uses.spans.push_back(id.span);
+      }
+      sortSpans(uses.spans);
+      return uses;
+    }
     if (!hit->member && a.kind == DocumentKind::ShaderLab && a.shader.findProperty(name))
-      return propertyUses(a, name, hit->span);
+      return propertyUses(a, name, hit->span, context);
     if (a.isGlsl(*unit) || (!hit->member && isBuiltinName(name)))
       return std::nullopt;
     // The declaration this unit sees, its own first.
@@ -1025,13 +1451,16 @@ namespace {
     if (decl) {
       uses.declaration = decl->nameSpan;
       uses.units = unitsSeeing(a, declUnit);
+      if (a.kind == DocumentKind::HlslInclude)
+        uses.declFile = a.path;
     } else if (auto external = findExternalDecl(includedFiles(a, visible, context), name)) {
       uses.kind = SymbolUses::Kind::External;
       for (size_t v = 0; v < a.units.size(); ++v) {
         if (!a.isGlsl(v))
           uses.units.push_back(v);
       }
-      uses.refusal = name + " is declared in " + displayPath(external->file->path) + ", outside this document.";
+      uses.declFile = external->file->path;
+      uses.refusal = name + " is declared in " + displayPath(external->file->path) + ", outside the workspace.";
     } else {
       // Nothing declares it at file scope: a parameter or a local, looked for in the declaration it is used in.
       uses.kind = SymbolUses::Kind::Local;
@@ -1039,8 +1468,8 @@ namespace {
       uses.item = hit->item;
     }
     for (size_t v : uses.units) {
-      for (const Identifier &id : v == *unit ? ids : identifiersIn(a.text, a.units[v].range)) {
-        if (!id.member && (!uses.item || id.item == *uses.item) && spanText(a, id.span) == name)
+      for (const Identifier &id : v == *unit ? ids : unitIdentifiers(a, v)) {
+        if (!id.member && !id.local && (!uses.item || id.item == *uses.item) && spanText(a, id.span) == name)
           uses.spans.push_back(id.span);
       }
     }
@@ -1048,8 +1477,8 @@ namespace {
     return uses;
   }
   // Whether `name` is already used where `uses` would be renamed: the new name would collide with it or shadow it.
-  bool nameInUse(const Analysis &a, const SymbolUses &uses, std::string_view name) {
-    if (uses.kind == SymbolUses::Kind::Property) {
+  bool nameInUse(const Analysis &a, const std::vector<size_t> &units, std::optional<size_t> item, bool property, std::string_view name) {
+    if (property) {
       if (a.shader.findProperty(name))
         return true;
       for (const auto &[text, span] : propertyRefs(a)) {
@@ -1057,9 +1486,9 @@ namespace {
           return true;
       }
     }
-    for (size_t v : uses.units) {
+    for (size_t v : units) {
       for (const Identifier &id : identifiersIn(a.text, a.units[v].range)) {
-        if (!id.member && (!uses.item || id.item == *uses.item) && spanText(a, id.span) == name)
+        if (!id.member && (!item || id.item == *item) && spanText(a, id.span) == name)
           return true;
       }
       for (const HlslDecl &decl : a.units[v].scan.decls) {
@@ -1068,6 +1497,84 @@ namespace {
       }
     }
     return false;
+  }
+  bool nameInUse(const Analysis &a, const SymbolUses &uses, std::string_view name) {
+    return nameInUse(a, uses.units, uses.item, uses.kind == SymbolUses::Kind::Property, name);
+  }
+  // ---- across files ------------------------------------------------------------
+  // Whether a symbol is looked for in the files around the document: one declared in an include file is, when that
+  // file is in the workspace or, for references alone, wherever it is.
+  bool reachesWorkspace(const SymbolUses &uses, const Workspace &workspace) {
+    return uses.declFile && (uses.kind == SymbolUses::Kind::External || workspace.contains(*uses.declFile));
+  }
+  // A symbol declared at file scope in `declFile` and named in one file that sees it.
+  struct FileUses {
+    std::shared_ptr<const Analysis> analysis;
+    std::vector<size_t> units; // the code that sees the declaring file
+    std::vector<Span> spans; // in document order
+    std::optional<Span> declaration; // in the declaring file
+    const MaterialProperty *property = nullptr; // the material property a shader binds to it
+  };
+  // The declaring file and every file in the workspace that includes it and names the symbol: in code that sees
+  // the include, and as the material property of a shader whose variable it is.
+  std::vector<FileUses> crossFileUses(const fs::path &declFile, const std::string &name, const Workspace &workspace, const FeatureContext &context) {
+    std::string declKey = pathKey(declFile);
+    std::vector<fs::path> files = workspace.filesMentioning(name);
+    // With an index, only the files that can see the declaration are looked into: the ones that include the
+    // declaring file, and the ones those include besides it, which are compiled after it - its siblings.
+    std::set<std::string> siblings;
+    if (auto includers = workspace.includers(declFile)) {
+      std::set<std::string> reach{declKey};
+      for (const fs::path &includer : *includers)
+        reach.insert(pathKey(includer));
+      std::vector<fs::path> roots = *includers;
+      roots.push_back(declFile);
+      for (const fs::path &sibling : workspace.included(roots).value_or(std::vector<fs::path>())) {
+        if (reach.insert(pathKey(sibling)).second)
+          siblings.insert(pathKey(sibling));
+      }
+      std::erase_if(files, [&](const fs::path &file) { return !reach.contains(pathKey(file)); });
+    }
+    if (std::none_of(files.begin(), files.end(), [&](const fs::path &file) { return pathKey(file) == declKey; }))
+      files.push_back(declFile); // outside the workspace
+    std::vector<FileUses> result;
+    for (const fs::path &path : files) {
+      FileUses uses{workspace.analysis(path)};
+      if (!uses.analysis)
+        continue;
+      const Analysis &a = *uses.analysis;
+      bool declaring = pathKey(path) == declKey;
+      bool sibling = siblings.contains(pathKey(path));
+      for (size_t u = 0; u < a.units.size(); ++u) {
+        if (a.isGlsl(u))
+          continue;
+        bool sees = declaring || sibling;
+        for (const auto &file : sees ? std::vector<std::shared_ptr<const CachedFile>>() : includedFiles(a, a.visibleUnits(u), context))
+          sees = sees || pathKey(file->path) == declKey;
+        if (sees)
+          uses.units.push_back(u);
+      }
+      if (uses.units.empty())
+        continue;
+      for (size_t u : uses.units) {
+        for (const Identifier &id : unitIdentifiers(a, u)) {
+          if (!id.member && !id.local && spanText(a, id.span) == name)
+            uses.spans.push_back(id.span);
+        }
+        for (const HlslDecl &decl : a.units[u].scan.decls) {
+          if (declaring && !uses.declaration && decl.name == name && decl.kind != DeclKind::Field)
+            uses.declaration = decl.nameSpan;
+        }
+      }
+      uses.property = a.kind == DocumentKind::ShaderLab ? a.shader.findProperty(name) : nullptr;
+      if (uses.property) {
+        for (Span span : propertyUses(a, name, {}).spans)
+          uses.spans.push_back(span);
+      }
+      sortSpans(uses.spans);
+      result.push_back(std::move(uses));
+    }
+    return result;
   }
 } // namespace
 json toRange(std::string_view text, const LineIndex &lines, Span span, Encoding encoding) {
@@ -1113,6 +1620,11 @@ json definition(const Analysis &a, size_t offset, const FeatureContext &context)
     if (word.empty())
       return nullptr;
     std::string name = spanText(a, word);
+    if (auto field = memberDecl(a, *unit, word, context)) {
+      if (!field->file)
+        return local(field->decl->nameSpan);
+      return location(field->file->path, field->file->text, field->file->lines, field->decl->nameSpan, context.encoding);
+    }
     if (const HlslDecl *decl = findLocalDecl(a, units, name))
       return local(decl->nameSpan);
     if (a.kind == DocumentKind::ShaderLab) {
@@ -1150,6 +1662,171 @@ json definition(const Analysis &a, size_t offset, const FeatureContext &context)
     }
   }
   return nullptr;
+}
+namespace {
+  // UTF-16 code units in `text`, which is how a signature's parameters are marked in its label.
+  size_t utf16Length(std::string_view text) {
+    size_t length = 0;
+    for (unsigned char c : text) {
+      if ((c & 0xC0) != 0x80)
+        length += c >= 0xF0 ? 2 : 1;
+    }
+    return length;
+  }
+  // A signature for the client: `label` such as "float3 Brighten(float3 c, float k)", with its parameters found
+  // between the parentheses. Optional parameters written "[, int2 offset]", as the method tables do, count too.
+  json signature(const std::string &label, const std::string &doc) {
+    json parameters = json::array();
+    size_t open = label.find('(');
+    if (open != std::string::npos) {
+      int depth = 0;
+      size_t start = open + 1;
+      for (size_t i = open + 1; i < label.size(); ++i) {
+        char c = label[i];
+        if (c == '(' || c == '<')
+          ++depth;
+        bool end = c == ')' && depth == 0;
+        if ((c == ')' || c == '>') && depth > 0 && !end)
+          --depth;
+        if (end || (c == ',' && depth == 0)) {
+          size_t b = start, e = i;
+          while (b < e && (std::isspace(static_cast<unsigned char>(label[b])) || label[b] == '[' || label[b] == ']'))
+            ++b;
+          while (e > b && (std::isspace(static_cast<unsigned char>(label[e - 1])) || label[e - 1] == '[' || label[e - 1] == ']'))
+            --e;
+          if (e > b)
+            parameters.push_back({{"label", {utf16Length(std::string_view(label).substr(0, b)), utf16Length(std::string_view(label).substr(0, e))}}});
+          start = i + 1;
+        }
+        if (end)
+          break;
+      }
+    }
+    json result{{"label", label}, {"parameters", std::move(parameters)}};
+    if (!doc.empty())
+      result["documentation"] = markdown(doc);
+    return result;
+  }
+  // Whether `query`'s letters appear in `name` in order, case aside: "brt" finds Brighten.
+  bool fuzzyMatch(std::string_view name, std::string_view query) {
+    size_t at = 0;
+    for (char c : name) {
+      if (at < query.size() && std::tolower(static_cast<unsigned char>(c)) == std::tolower(static_cast<unsigned char>(query[at])))
+        ++at;
+    }
+    return at == query.size();
+  }
+} // namespace
+json signatureHelp(const Analysis &a, size_t offset, const FeatureContext &context) {
+  auto unit = a.unitAt(offset);
+  if (!unit || a.isGlsl(*unit))
+    return nullptr;
+  // Back from the cursor to the '(' of the call it is in, counting the commas before it at that call's own level.
+  std::vector<HlslToken> tokens = lexHlsl(a.text, {a.units[*unit].range.begin, offset});
+  auto is = [&](size_t k, char c) { return tokens[k].kind == HlslTok::Punct && a.text[tokens[k].span.begin] == c; };
+  int depth = 0;
+  int active = 0;
+  std::optional<size_t> open;
+  for (size_t k = tokens.size(); k-- > 0;) {
+    if (tokens[k].kind == HlslTok::Directive)
+      return nullptr;
+    if (is(k, ')') || is(k, ']'))
+      ++depth;
+    else if ((is(k, '(') || is(k, '[')) && depth > 0)
+      --depth;
+    else if (is(k, '(')) {
+      open = k;
+      break;
+    } else if (depth == 0 && (is(k, ',')))
+      ++active;
+    else if (depth == 0 && (is(k, ';') || is(k, '{') || is(k, '}') || is(k, '[')))
+      return nullptr;
+  }
+  if (!open || *open == 0 || tokens[*open - 1].kind != HlslTok::Ident)
+    return nullptr;
+  Span callee = tokens[*open - 1].span;
+  std::string name = a.text.substr(callee.begin, callee.end - callee.begin);
+  json signatures = json::array();
+  auto dot = dotBefore(a.text, callee.begin, a.units[*unit].range.begin);
+  if (dot) {
+    TypeResolver resolver(a, *unit, context);
+    auto type = resolver.typeBefore(*dot);
+    for (const ref::Entry *method : type ? hlsl::methodsOf(type->name) : std::vector<const ref::Entry *>()) {
+      if (method->name == name)
+        signatures.push_back(signature(std::string(method->detail), std::string(method->doc)));
+    }
+  } else {
+    std::vector<size_t> units = a.visibleUnits(*unit);
+    for (bool activeCode : {true, false}) {
+      for (size_t u : units) {
+        for (const HlslDecl &decl : a.units[u].scan.decls) {
+          if (decl.kind == DeclKind::Function && decl.name == name && decl.active == activeCode)
+            signatures.push_back(signature(decl.detail, decl.doc));
+        }
+      }
+    }
+    if (signatures.empty()) {
+      for (const auto &file : includedFiles(a, units, context)) {
+        for (const HlslDecl &decl : file->scan.decls) {
+          if (decl.kind == DeclKind::Function && decl.name == name)
+            signatures.push_back(signature(decl.detail, decl.doc + (decl.doc.empty() ? "" : "\n\n") + "Defined in `" + displayPath(file->path) + "`"));
+        }
+      }
+    }
+    if (const ref::Entry *intrinsic = hlsl::findIntrinsic(name))
+      signatures.push_back(signature(std::string(intrinsic->detail), std::string(intrinsic->doc)));
+  }
+  if (signatures.empty())
+    return nullptr;
+  // The first overload with room for the parameter the cursor is on.
+  size_t chosen = 0;
+  for (size_t i = 0; i < signatures.size(); ++i) {
+    if (signatures[i]["parameters"].size() > static_cast<size_t>(active)) {
+      chosen = i;
+      break;
+    }
+  }
+  return {{"signatures", std::move(signatures)}, {"activeSignature", chosen}, {"activeParameter", active}};
+}
+json workspaceSymbols(const std::string &query, const Workspace &workspace, const FeatureContext &context) {
+  constexpr size_t kLimit = 1000;
+  json result = json::array();
+  if (const Index *index = workspace.index()) {
+    for (const Index::Symbol &symbol : index->symbols(query, context.encoding, kLimit)) {
+      std::string file = symbol.path.filename().string();
+      json start{{"line", symbol.line}, {"character", symbol.column}};
+      json end{{"line", symbol.line}, {"character", symbol.column + symbol.length}};
+      int kind = symbol.kind == Index::kShaderName ? kSymClass : symbolKindFor(static_cast<DeclKind>(symbol.kind));
+      result.push_back({{"name", symbol.name}, {"kind", kind}, {"location", {{"uri", workspace.uri(symbol.path)}, {"range", {{"start", start}, {"end", end}}}}},
+        {"containerName", symbol.container.empty() ? file : symbol.container + " (" + file + ")"}});
+    }
+    return result;
+  }
+  for (const fs::path &path : workspace.files()) {
+    auto a = workspace.analysis(path);
+    if (!a)
+      continue;
+    std::string uri = workspace.uri(path);
+    std::string file = path.filename().string();
+    auto add = [&](const std::string &name, int kind, Span span, const std::string &container) {
+      if (result.size() >= kLimit || !fuzzyMatch(name, query))
+        return;
+      // The client addresses an open document by the URI it opened it with.
+      json where{{"uri", uri}, {"range", toRange(a->text, a->lines, span, context.encoding)}};
+      result.push_back({{"name", name}, {"kind", kind}, {"location", std::move(where)}, {"containerName", container}});
+    };
+    if (a->kind == DocumentKind::ShaderLab && a->shader.hasShader && !a->shader.name.empty())
+      add(a->shader.name, kSymClass, a->shader.nameSpan.empty() ? a->shader.keyword : a->shader.nameSpan, file);
+    for (size_t u = 0; u < a->units.size(); ++u) {
+      for (const HlslDecl &decl : a->isGlsl(u) ? std::vector<HlslDecl>() : a->units[u].scan.decls) {
+        if (decl.kind != DeclKind::Field)
+          add(decl.name, symbolKindFor(decl.kind), decl.nameSpan, decl.container.empty() ? file : decl.container + " (" + file + ")");
+      }
+    }
+    if (result.size() >= kLimit)
+      break;
+  }
+  return result;
 }
 json documentSymbols(const Analysis &a, const FeatureContext &context) {
   json result = json::array();
@@ -1209,11 +1886,21 @@ json documentSymbols(const Analysis &a, const FeatureContext &context) {
   result.push_back(symbol(a, shader.name.empty() ? "Shader" : shader.name, "Shader", kSymClass, shader.span, shader.nameSpan.empty() ? shader.keyword : shader.nameSpan, children, context));
   return result;
 }
-json references(const Analysis &a, const std::string &uri, size_t offset, bool includeDeclaration, const FeatureContext &context) {
+json references(const Analysis &a, const std::string &uri, size_t offset, bool includeDeclaration, const FeatureContext &context, const Workspace &workspace) {
   auto uses = symbolUses(a, offset, context);
   if (!uses)
     return nullptr;
   json result = json::array();
+  if (reachesWorkspace(*uses, workspace)) {
+    for (const FileUses &file : crossFileUses(*uses->declFile, uses->name, workspace, context)) {
+      const Analysis &f = *file.analysis;
+      for (Span span : file.spans) {
+        if (includeDeclaration || !file.declaration || span.begin != file.declaration->begin)
+          result.push_back({{"uri", workspace.uri(f.path)}, {"range", toRange(f.text, f.lines, span, context.encoding)}});
+      }
+    }
+    return result;
+  }
   for (Span span : uses->spans) {
     if (includeDeclaration || !uses->declaration || span.begin != uses->declaration->begin)
       result.push_back({{"uri", uri}, {"range", toRange(a.text, a.lines, span, context.encoding)}});
@@ -1232,47 +1919,77 @@ json documentHighlights(const Analysis &a, size_t offset, const FeatureContext &
   }
   return result;
 }
-json prepareRename(const Analysis &a, size_t offset, const FeatureContext &context) {
-  auto uses = symbolUses(a, offset, context);
-  if (!uses)
-    return nullptr;
-  if (!uses->refusal.empty())
-    throw RequestRefused(uses->refusal);
-  return {{"range", toRange(a.text, a.lines, uses->at, context.encoding)}, {"placeholder", uses->name}};
-}
-json rename(const Analysis &a, const std::string &uri, size_t offset, const std::string &newName, const FeatureContext &context) {
-  auto uses = symbolUses(a, offset, context);
-  if (!uses)
-    throw RequestRefused("There is no symbol here to rename.");
-  if (!uses->refusal.empty())
-    throw RequestRefused(uses->refusal);
-  if (newName.empty() || !isIdentStart(newName[0]) || !std::all_of(newName.begin(), newName.end(), isIdentChar))
-    throw RequestRefused("'" + newName + "' is not a valid identifier.");
-  if (isBuiltinName(newName))
-    throw RequestRefused(newName + " is an HLSL keyword, type or intrinsic.");
-  json edits = json::array();
-  if (newName != uses->name) {
-    if (nameInUse(a, *uses, newName))
-      throw RequestRefused(newName + " is already in use here; renaming " + uses->name + " to it would change what the code means.");
+namespace {
+  // The symbol a rename starts from, refused when it can't be renamed safely.
+  SymbolUses renamable(std::optional<SymbolUses> uses, const Workspace &workspace) {
+    if (!uses)
+      throw RequestRefused("There is no symbol here to rename.");
+    // A symbol from an include file is renamed in that file and everything including it, when they are the user's.
+    if (uses->kind == SymbolUses::Kind::External && uses->declFile && workspace.contains(*uses->declFile))
+      uses->refusal.clear();
+    if (!uses->refusal.empty())
+      throw RequestRefused(uses->refusal);
+    return std::move(*uses);
+  }
+  // The edits renaming `spans` in one file, and with a texture property the variables Unity binds by its name in
+  // `units`.
+  json renameEdits(const Analysis &a, const std::vector<size_t> &units, const std::vector<Span> &spans, bool texture, const std::string &from, const std::string &to, Encoding encoding) {
+    json edits = json::array();
     auto edit = [&](Span span, const std::string &text) {
-      edits.push_back({{"range", toRange(a.text, a.lines, span, context.encoding)}, {"newText", text}});
+      edits.push_back({{"range", toRange(a.text, a.lines, span, encoding)}, {"newText", text}});
     };
-    for (Span span : uses->spans)
-      edit(span, newName);
-    const MaterialProperty *property = uses->kind == SymbolUses::Kind::Property ? a.shader.findProperty(uses->name) : nullptr;
-    if (property && isTextureProperty(*property)) {
-      auto companions = textureCompanions(uses->name, newName);
-      for (size_t v : uses->units) {
-        for (const Identifier &id : identifiersIn(a.text, a.units[v].range)) {
+    for (Span span : spans)
+      edit(span, to);
+    if (texture) {
+      auto companions = textureCompanions(from, to);
+      for (size_t v : units) {
+        for (const Identifier &id : unitIdentifiers(a, v)) {
           std::string text = spanText(a, id.span);
-          for (const auto &[from, to] : companions) {
-            if (!id.member && text == from)
-              edit(id.span, to);
+          for (const auto &[old, renamed] : companions) {
+            if (!id.member && !id.local && text == old)
+              edit(id.span, renamed);
           }
         }
       }
     }
+    return edits;
   }
-  return {{"changes", {{uri, std::move(edits)}}}};
+} // namespace
+json prepareRename(const Analysis &a, size_t offset, const FeatureContext &context, const Workspace &workspace) {
+  auto found = symbolUses(a, offset, context);
+  if (!found)
+    return nullptr;
+  SymbolUses uses = renamable(std::move(found), workspace);
+  return {{"range", toRange(a.text, a.lines, uses.at, context.encoding)}, {"placeholder", uses.name}};
+}
+json rename(const Analysis &a, const std::string &uri, size_t offset, const std::string &newName, const FeatureContext &context, const Workspace &workspace) {
+  SymbolUses uses = renamable(symbolUses(a, offset, context), workspace);
+  if (newName.empty() || !isIdentStart(newName[0]) || !std::all_of(newName.begin(), newName.end(), isIdentChar))
+    throw RequestRefused("'" + newName + "' is not a valid identifier.");
+  if (isBuiltinName(newName))
+    throw RequestRefused(newName + " is an HLSL keyword, type or intrinsic.");
+  auto inUse = [&] {
+    return RequestRefused(newName + " is already in use here; renaming " + uses.name + " to it would change what the code means.");
+  };
+  json changes = json::object();
+  if (newName == uses.name)
+    return {{"changes", changes}};
+  if (reachesWorkspace(uses, workspace)) {
+    std::vector<FileUses> files = crossFileUses(*uses.declFile, uses.name, workspace, context);
+    bool texture = false;
+    for (const FileUses &file : files) {
+      if (nameInUse(*file.analysis, file.units, std::nullopt, file.property != nullptr, newName))
+        throw inUse();
+      texture = texture || (file.property && isTextureProperty(*file.property));
+    }
+    for (const FileUses &file : files)
+      changes[workspace.uri(file.analysis->path)] = renameEdits(*file.analysis, file.units, file.spans, texture, uses.name, newName, context.encoding);
+    return {{"changes", changes}};
+  }
+  if (nameInUse(a, uses, newName))
+    throw inUse();
+  const MaterialProperty *property = uses.kind == SymbolUses::Kind::Property ? a.shader.findProperty(uses.name) : nullptr;
+  changes[uri] = renameEdits(a, uses.units, uses.spans, property && isTextureProperty(*property), uses.name, newName, context.encoding);
+  return {{"changes", changes}};
 }
 } // namespace sls

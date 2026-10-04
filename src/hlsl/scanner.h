@@ -34,6 +34,7 @@ struct HlslDecl {
   std::string container; // struct or cbuffer name for fields/members
   std::string doc; // the comment above the declaration, or after it on the same line, without comment markers
   bool zeroParams = false; // macro declared as NAME()
+  bool active = true; // false inside code an #if leaves out of the variant analyzed
 };
 struct HlslScan {
   std::vector<HlslPragma> pragmas;

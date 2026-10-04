@@ -18,6 +18,20 @@ local function executable()
   return ok and provision.executable() or 'shaderlab-ls'
 end
 
+-- Which languages get the server's semantic tokens: those no tree-sitter parser is installed for. The tokens are for
+-- an editor with nothing else to highlight a shader with; next to a tree-sitter grammar they would only paint over
+-- it, being drawn above it. Set init_options.semanticTokens (true, false, or a table like the one this returns) to
+-- decide for yourself.
+local function semantic_tokens()
+  local languages = {}
+  for _, filetype in ipairs { 'shaderlab', 'hlsl', 'glsl' } do
+    local lang = vim.treesitter.language.get_lang(filetype) or filetype
+    local found, loaded = pcall(vim.treesitter.language.add, lang)
+    languages[filetype] = not (found and loaded)
+  end
+  return languages
+end
+
 ---@type vim.lsp.Config
 return {
   -- Resolved per client start, not once when this file is read: vim.lsp.enable() reads it eagerly and caches the
@@ -34,6 +48,16 @@ return {
   -- executable itself rather than talk to the server (conform.nvim's `command`, a keymap, :!) asks for it here.
   -- It resolves exactly as the server does, so it provides the executable too when the checkout is behind.
   executable = executable,
+  -- Not part of vim.lsp.Config either: what before_init sends as semanticTokens, for :checkhealth to report.
+  semantic_tokens = semantic_tokens,
+  -- At each client start, so a parser installed during the session counts from the next start on.
+  before_init = function(params)
+    -- A copy: the table is init_options itself, which would otherwise keep this start's answer for every later one.
+    params.initializationOptions = vim.deepcopy(params.initializationOptions or {})
+    if params.initializationOptions.semanticTokens == nil then
+      params.initializationOptions.semanticTokens = semantic_tokens()
+    end
+  end,
   -- GLSL is formatted but never analyzed, here as in a GLSLPROGRAM block; pair it with glsl_analyzer for the rest,
   -- which plugin/shaderlab-ls.lua then attaches to GLSLPROGRAM blocks too.
   filetypes = { 'shaderlab', 'hlsl', 'glsl' },
@@ -52,5 +76,7 @@ return {
     -- keywords = { '_NORMALMAP' },       -- shader keywords to treat as enabled
     -- defines = { 'MY_DEFINE=1' },       -- extra macros for every compile
     diagnostics = { compiler = 'auto', delay = 400 },  -- compiler: 'auto', 'fxc', 'dxc' or 'none'
+    -- indexCache = true,                 -- where the index is saved between sessions: true, false or a folder
+    -- semanticTokens = true,             -- by default, for the languages no tree-sitter parser is installed for
   },
 }

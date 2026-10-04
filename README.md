@@ -15,8 +15,9 @@ Unity 6.6 Manual's [ShaderLab language reference](https://docs.unity3d.com/Manua
 [Integrations](#integrations) for which of the two should format.
 
 For **syntax highlighting**, pair it with [tree-sitter-shaderlab](https://github.com/msagca/tree-sitter-shaderlab),
-my Tree-sitter grammar for ShaderLab. This server implements no semantic highlighting; the two are meant to be used
-together.
+my Tree-sitter grammar for ShaderLab. An editor with no grammar for shaders can take the server's semantic tokens
+instead; the Neovim plugin uses them for the languages it has no Tree-sitter parser for, and leaves the rest to
+Tree-sitter.
 
 ## Features
 
@@ -30,17 +31,47 @@ together.
 - **HLSL diagnostics from FXC or DXC** for each shader stage (`vs`/`ps`/`gs`/`hs`/`ds`, `cs` for compute kernels),
   with Unity's include resolution and preprocessing — see [How HLSL is checked](#how-hlsl-is-checked). Errors inside
   included files are reported on the `#include` line that pulls them in.
+- **Variants**: one is checked at a time, Unity's default unless you choose another. A code action on a
+  `multi_compile` or `shader_feature` line checks the variant with another of its keywords, or without any, and one
+  more goes back to the default; compiler messages from a variant you chose name its keywords.
+- **Inactive code**: what an `#if`, `#ifdef` or `#elif` leaves out of the variant checked is reported as unnecessary
+  code, which editors fade out, and its declarations give way to the ones compiled. Conditions are worked out with
+  the variant's keywords — those of `#include_with_pragmas` files too — the compile's defines and the file's own
+  `#define`s; one that depends on something it can't know, such as a macro from an include file, counts as possibly
+  true, so code is only faded when it is left out for certain. An include file is worked out in each shader that
+  includes it, with that shader's variant and the `#define`s before its `#include`, and faded where none of them
+  compiles it; one no shader includes is faded only where its own `#define`s decide.
+- **Code actions**: the variant actions above, and a quick fix that declares a material property a `[_Prop]` names.
 - **Completion, hover, go to definition and document symbols**, for ShaderLab keywords, commands, values, tags and
   pragmas, and for HLSL symbols — properties, entry points, `#include` paths, functions, structs, variables, macros
-  — from the shader and everything it includes (URP/HDRP packages, `UnityCG.cginc`, ...).
-- **References, highlights and rename** within the document. A material property's uses are its declaration, its
-  `[_Prop]` references and the shader variables of that name in every pass, HLSL or GLSL; an `HLSLINCLUDE` symbol's,
-  every pass that sees it; a pass's own `vert`, only that pass, `#pragma vertex vert` included; a parameter or local,
-  only the function it is in. Renaming a texture property renames its `_ST`, `_TexelSize`, `_HDR` and `sampler`
-  variables with it. A rename is refused, with the reason, for names declared in an included file and for struct
-  members, which are matched by name only, and when the new name is already in use there.
+  — from the shader and everything it includes (URP/HDRP packages, `UnityCG.cginc`, ...). Hover also describes
+  HLSL's own keywords, types, intrinsics, semantics, `[attributes]` and texture methods.
+- **Include files in context**: an `.hlsl` or `.cginc` file sees what the shaders that include it declare — the
+  includer's own code and its other includes — so hover, go to definition, member completion and signature help work
+  on names it uses without including them, such as `_BaseMap` in URP's `LitForwardPass.hlsl`, which `LitInput.hlsl`
+  declares before it.
+- **Signature help** inside a call: the document's and its includes' functions, overloads included, the intrinsics
+  and the methods of the object before a `.`, with the parameter the cursor is on.
+- **Workspace symbols**: the functions, structs, cbuffers, globals and macros of the workspace's shader files, and
+  the shaders by name, matched by the query's letters in order.
+- **Members after `.`**: a struct's fields, a vector's components (`xyzw`, `rgba`), a matrix's `_mRC` elements and a
+  texture's or buffer's methods, for parameters, locals, globals, fields, `buffer[i]` elements and function results
+  (`input.uv.`, `_Lights[i].color.`, `GetSurface().normal.`), Unity's `TEXTURE2D(...)` declarations included.
+  Hover and go to definition on a member find the field of the right struct.
+- **References, highlights and rename**. A material property's uses are its declaration, its `[_Prop]` references
+  and the shader variables of that name in every pass, HLSL or GLSL; an `HLSLINCLUDE` symbol's, every pass that sees
+  it; a pass's own `vert`, only that pass, `#pragma vertex vert` included; a parameter or local, the block it is
+  declared in, `for` and `if` headers included, and not a global or another local it shadows or is shadowed by. A
+  symbol declared in an include file reaches across the workspace: the file declaring it and every
+  `.shader`, `.compute`, `.hlsl` and `.cginc` that includes it, open or not — and with them the material properties
+  of the shaders whose variable it is. Renaming a texture property renames its `_ST`, `_TexelSize`, `_HDR` and
+  `sampler` variables with it. A rename is refused, with the reason, for names declared outside the workspace (in a
+  package or the editor), for struct members, which are matched by name only, and when the new name is already in
+  use where it would go.
+- **Semantic tokens** for ShaderLab and HLSL: keywords, types, properties, functions, parameters, locals, fields,
+  macros, semantics, attributes; for GLSL, only comments, strings, numbers and directives.
 - **Formatting** of `.shader`, `.compute`, `.hlsl`, `.cginc`, `.hlslinc`, `.glsl` and `.glslinc` files, over LSP
-  (`textDocument/formatting`) or the command line (`--format`).
+  (`textDocument/formatting` and `rangeFormatting`) or the command line (`--format`).
 
 ## Formatting
 
@@ -71,6 +102,9 @@ reads as a constructor initializer list, is joined back onto its signature. With
 shipped with the Unity 6000.6 editor come out byte-identical under clang-format 18 and 23 for all but four — the
 usual spread across versions, so pin one for a shared project.
 
+A range is formatted as part of the whole file, and only the changes that touch its lines are kept: its lines come
+out as they would from formatting everything, and the lines around it are left as they are.
+
 clang-format is looked up on `PATH`; `clangFormatPath` (or `--clang-format`) points at another one. It is optional
 for `.shader` files, whose code blocks are then left as they were written, but a file that is code from end to end
 cannot be formatted without it.
@@ -79,7 +113,7 @@ cannot be formatted without it.
 
 | | Windows | Linux |
 | --- | --- | --- |
-| ShaderLab diagnostics, completion, hover, definition, symbols | yes | yes |
+| ShaderLab diagnostics, completion, hover, definition, symbols, references, rename, semantic tokens | yes | yes |
 | Formatting (needs clang-format) | yes | yes |
 | HLSL diagnostics from FXC | yes | no: `d3dcompiler_47.dll` is Windows only |
 | HLSL diagnostics from DXC | for `#pragma use_dxc` | for every shader |
@@ -154,7 +188,7 @@ binary that reports a different one from `--version`, so a release cannot be nam
 It builds, tests and fuzzes both targets before publishing, and attaches `SHA256SUMS`.
 
 ```
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.3.0 && git push origin v0.3.0
 ```
 
 ## Usage
@@ -182,6 +216,33 @@ key):
 | `defines` | `[]` | Extra macros for every compile, as `NAME` or `NAME=VALUE`. |
 | `diagnostics.compiler` | `auto` | `auto`: FXC, and DXC for `#pragma use_dxc` or where there is no FXC. `fxc` or `dxc`: that one for every shader. `none`: no compiling. |
 | `diagnostics.delay` | `400` | Milliseconds to wait after an edit before compiling. |
+| `indexCache` | `true` | Where the index is saved between sessions: `true` for the user's cache folder, `false` for nowhere, or a folder. Read at `initialize`. |
+| `semanticTokens` | `true` | Semantic tokens: `true` or `false` for all languages, or `{"shaderlab": ..., "hlsl": ..., "glsl": ...}` for each (`hlsl` covers `.compute`, `.cginc` and `.hlslinc` too). Offered at all only if one is on at `initialize`. |
+
+References, renames and workspace symbols reach into the client's workspace folders (`workspaceFolders`, else
+`rootUri`), skipping `Library`, `Temp`, `Logs`, `obj`, `UserSettings`, `Build`, `Builds`, `node_modules` and the
+folders Unity hides (a name starting with `.` or ending with `~`). A document outside all of them brings in the Unity
+project it is in.
+
+### The index
+
+The server indexes those folders in the background when it starts: every shader file's declarations, the names its
+code uses, and what it includes — the package and editor files it reaches through `#include` too, so that the
+include graph is whole. Questions about the workspace are then lookups: which files name `X`, which include `Y`,
+what is declared as something like `Z`. A workspace question asked before the first crawl is done waits for it, up
+to ten seconds, and is answered by reading the folders after that.
+
+The index is saved between sessions, one file per set of folders, in the user's cache folder: `%LOCALAPPDATA%` on
+Windows, `$XDG_CACHE_HOME` or `~/.cache` elsewhere, under `shaderlab-ls/index` — never in the project. The next
+session loads it and indexes only the files that changed in the meantime: URP's 287 shader files and the package
+files they include take about two seconds from scratch and a tenth of one from the saved index, which is under a
+megabyte. A saved index unused for 30 days is deleted, and one written by another version of the server is not
+read.
+
+It is kept current from three sources: open documents as they are typed, the client's reports of files changing on
+disk (`workspace/didChangeWatchedFiles`, which the server registers for when the client can watch files), and, for a
+client that can't, a crawl of the folders for changes at most every five seconds, when a workspace question is
+asked.
 
 ## Integrations
 
@@ -239,9 +300,19 @@ the other path to do the work:
 
 With both set, the plugin only reports, and falls back to a `shaderlab-ls` on `PATH` when the checkout has none.
 
+The variant a shader is checked as is chosen with code actions (`gra`, or `vim.lsp.buf.code_action()`) on a
+`multi_compile` or `shader_feature` line, and stays chosen while the buffer is open.
+
+Highlighting is Tree-sitter's where there is a parser for it: the config asks the server for semantic tokens only
+for the languages — `shaderlab`, `hlsl`, `glsl` — that no Tree-sitter parser is installed for, since the tokens are
+drawn above Tree-sitter's highlighting and would paint over it. Which parsers there are is read each time the
+server starts. Set `init_options.semanticTokens` to `true`, `false` or a table like `{ shaderlab = false, hlsl = true
+}` to decide for yourself.
+
 `:checkhealth shaderlab-ls` reports on all of it: whether the config is enabled, which executable runs and whether
 it is current for the checkout, why the last download or build failed, whether clang-format and the compiler
-settings are usable, what the shader extensions map to, and which GLSL servers the `GLSLPROGRAM` blocks go to.
+settings are usable, what the shader extensions map to, which languages get semantic tokens, and which GLSL servers
+the `GLSLPROGRAM` blocks go to.
 
 The server keeps running while its replacement builds. Neither Windows nor Linux lets a linker write over a
 running executable, so the old one is moved aside first and put back if the build fails: a build that cannot
@@ -301,8 +372,9 @@ no `never_use_dxc`, it builds Unity's Direct3D 12 program and runs DXC instead.
   `UnityShaderVariables.cginc`, as in Unity.
 - Defines: `SHADER_API_D3D11`, `SHADER_API_DESKTOP`, `SHADER_TARGET` (from `#pragma target`, default 2.5),
   `SHADER_STAGE_*`, `UNITY_VERSION`, `UNITY_PASS_<LIGHTMODE>` for Built-in Render Pipeline passes,
-  `UNITY_COMPILER_DXC` under DXC, and the keywords of the default variant — the first of each
-  `multi_compile`/`shader_feature` set unless it allows "all off", overridable with the `keywords` setting.
+  `UNITY_COMPILER_DXC` under DXC, and the keywords of the variant: for each `multi_compile`/`shader_feature`
+  set, the one chosen for the document with a code action, else the one the `keywords` setting names, else Unity's
+  default — the first of the set unless it allows "all off".
 - Profiles: `*_5_0` from `#pragma target 4.5` up, for `#pragma require` values that need shader model 5, and always
   for hull, domain and compute; `*_4_0` otherwise. DXC starts at `*_6_0` (`*_6_5` for `inlineraytracing`) and
   compiles HLSL 2018 (`-HV 2018`), the language Unity's shader code is written in.
@@ -319,20 +391,28 @@ no `never_use_dxc`, it builds Unity's Direct3D 12 program and runs DXC instead.
 
 ## Limitations
 
-- One variant per program is checked, and FXC often reports only the first error of a function body.
-- Declaration scanning is lexical: it does not evaluate `#if` branches or resolve struct member types, so there is
-  no member completion after `.`.
+- One variant per program is compiled at a time, so an error in another variant shows only once you choose it, and
+  FXC often reports only the first error of a function body.
+- `#if` conditions are worked out, not preprocessed: macros are not expanded, so a condition on a function-like
+  macro, or on a macro an include file defines, is not known either way, and the code under it counts as active.
+  Include files are searched for declarations in every branch.
+- Member completion reads types from declarations, so a type behind a macro — other than Unity's `TEXTURE2D(...)`
+  and the like — or a `typedef` is not seen through. Semantic tokens color a name by what it is declared as in the
+  shader or its includes, not by the scope it is in.
 - `UNITY_VERSION` is computed as `major * 100 + minor * 10` from the editor version (2021.2 -> 202120).
 - On Linux every shader compiles with DXC for shader model 6, while Unity uses FXC for most. The two mostly agree
   (all but 3 of the 233 shaders shipped with the Unity 6000.6 editor compile cleanly under both), but SM6 rules
   apply: the pixel shader output semantic `COLOR`, which FXC accepts for `SV_Target`, is an error, for example. DXC
   also runs without the DXIL validator (`-Vd`), which would need `dxil.dll` next to it; the front end, where nearly
   all errors come from, runs in full.
-- Documents are synchronized in full on every change; range formatting and semantic highlighting are not
-  implemented.
-- References and rename stay within the open document: nothing indexes the project, so a material property renamed
-  here keeps its old name in `.mat` files and C# scripts, and a symbol from an included file can't be renamed. Locals
-  are told apart by the function they are in, not by block scope.
+- Documents are synchronized in full on every change.
+- References and renames follow `#include`s through the workspace's shader files and nothing else: a material
+  property renamed here keeps its old name in `.mat` files and C# scripts. Scopes are read lexically: a parameter or
+  local that a macro declares is not seen as one.
+- An include file's context comes from its 16 nearest includers, merged: where two shaders declare one of its names
+  differently, the nearer one's declaration is used. Its `#if` directives are worked out in the shaders that include
+  it directly, with their default variants; when one of its includers is another include file, they are not known
+  either way.
 - clang-format reads the HLSL as C++, so a `.clang-format` with only a `Language: CSharp` section does not apply to
   it, and options that rewrite code rather than lay it out (`InsertBraces`, `RemoveSemicolon`, ...) apply to HLSL as
   they would to C++.

@@ -41,7 +41,7 @@ def main():
     client = Client(exe)
     client.request("initialize", {"processId": None, "rootUri": None,
                                   "capabilities": {"general": {"positionEncodings": ["utf-16"]}},
-                                  "initializationOptions": {"diagnostics": {"compiler": "auto" if os.environ.get("FUZZ_COMPILE") == "1" else "none", "delay": 0}}})
+                                  "initializationOptions": {"indexCache": False, "diagnostics": {"compiler": "auto" if os.environ.get("FUZZ_COMPILE") == "1" else "none", "delay": 0}}})
     client.notify("initialized", {})
     start = time.time()
     for path in files:
@@ -67,11 +67,21 @@ def main():
             except AssertionError as error:
                 if "failed" not in str(error):  # a refused rename is an answer; a timeout is not
                     raise
-            try:
-                client.request("textDocument/formatting", {"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": True}}, timeout=10)
-            except AssertionError as error:
-                if "can't format" not in str(error):  # refusing unbalanced input is expected
-                    raise
+            client.request("textDocument/semanticTokens/full", {"textDocument": {"uri": uri}}, timeout=10)
+            client.request("textDocument/signatureHelp", params, timeout=10)
+            actions = client.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": {"start": position, "end": position},
+                                                                 "context": {"diagnostics": []}}, timeout=10)
+            for action in actions[:1]:
+                if "command" in action:
+                    client.request("workspace/executeCommand", action["command"], timeout=10)
+            last = rng.randrange(line, len(lines))
+            for method, extra in [("textDocument/formatting", {}),
+                                  ("textDocument/rangeFormatting", {"range": {"start": position, "end": {"line": last, "character": 0}}})]:
+                try:
+                    client.request(method, {"textDocument": {"uri": uri}, "options": {"tabSize": 2, "insertSpaces": True}, **extra}, timeout=10)
+                except AssertionError as error:
+                    if "can't format" not in str(error):  # refusing unbalanced input is expected
+                        raise
             client.pending.clear()
             if client.proc.poll() is not None:
                 print(f"server exited with {client.proc.returncode} on {path.name} v{version}")

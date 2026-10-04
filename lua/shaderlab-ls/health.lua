@@ -5,12 +5,21 @@ local M = {}
 
 local health = vim.health
 
+-- 0.12.5, or 0.13.0-dev: tostring(vim.version()) appends the build, which on a release repeats the version
+-- (0.12.5+v0.12.5).
+local function neovim_version()
+  local v = vim.version()
+  local text = ('%d.%d.%d'):format(v.major, v.minor, v.patch)
+  if v.prerelease then text = text .. '-' .. (type(v.prerelease) == 'string' and v.prerelease or 'dev') end
+  return text
+end
+
 local function check_neovim()
   health.start 'Neovim'
   if vim.fn.has 'nvim-0.12' == 1 then
-    health.ok(tostring(vim.version()))
+    health.ok(neovim_version())
   else
-    health.error(('Neovim %s is too old'):format(tostring(vim.version())), 'The plugin needs Neovim 0.12 or newer.')
+    health.error(('Neovim %s is too old'):format(neovim_version()), 'The plugin needs Neovim 0.12 or newer.')
   end
 end
 
@@ -169,6 +178,21 @@ local function check_filetypes()
   vim.api.nvim_buf_delete(scratch, { force = true })
 end
 
+local function check_highlighting(config)
+  health.start 'Highlighting'
+  local setting = config and config.init_options and config.init_options.semanticTokens
+  local languages = setting
+  if setting == nil then languages = config and config.semantic_tokens and config.semantic_tokens() or {} end
+  for _, filetype in ipairs { 'shaderlab', 'hlsl', 'glsl' } do
+    local on = languages
+    if type(languages) == 'table' then on = languages[filetype] ~= false end
+    local why = setting ~= nil and 'init_options.semanticTokens'
+      or on and 'no tree-sitter parser for it'
+      or 'a tree-sitter parser highlights it'
+    health.info(('%s: %s (%s)'):format(filetype, on and 'semantic tokens from the server' or 'no semantic tokens', why))
+  end
+end
+
 local function check_glsl()
   health.start 'GLSL blocks'
   if vim.g.shaderlab_ls_glsl == false then
@@ -204,6 +228,7 @@ function M.check()
   check_server(found and provision or nil, config)
   check_tools(config)
   check_filetypes()
+  check_highlighting(config)
   check_glsl()
 end
 

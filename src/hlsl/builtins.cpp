@@ -630,6 +630,71 @@ const ref::Entry *findAttribute(std::string_view name) {
 const ref::Entry *findMethod(std::string_view name) {
   return findExact(kMethods, name);
 }
+std::vector<const ref::Entry *> methodsOf(std::string_view type) {
+  std::vector<std::string_view> names;
+  auto add = [&](std::initializer_list<std::string_view> list) { names.insert(names.end(), list); };
+  bool rw = type.starts_with("RW");
+  std::string_view base = rw ? type.substr(2) : type;
+  if (base.starts_with("Texture2DMS")) {
+    add({"Load", "GetDimensions"});
+    if (!rw)
+      add({"GetSamplePosition"});
+  } else if (base.starts_with("Texture")) {
+    add({"Load", "GetDimensions"});
+    if (!rw) {
+      add({"Sample", "SampleBias", "SampleCmp", "SampleCmpLevelZero", "SampleGrad", "SampleLevel", "CalculateLevelOfDetail", "CalculateLevelOfDetailUnclamped"});
+      if (!base.starts_with("Texture1D") && !base.starts_with("Texture3D"))
+        add({"Gather", "GatherRed", "GatherGreen", "GatherBlue", "GatherAlpha", "GatherCmp", "GatherCmpRed", "GatherCmpGreen", "GatherCmpBlue", "GatherCmpAlpha"});
+    }
+  } else if (base == "Buffer" || base == "StructuredBuffer") {
+    add({"Load", "GetDimensions"});
+    if (rw && base == "StructuredBuffer")
+      add({"IncrementCounter", "DecrementCounter"});
+  } else if (base == "ByteAddressBuffer") {
+    add({"Load", "Load2", "Load3", "Load4", "GetDimensions"});
+    if (rw)
+      add({"Store", "Store2", "Store3", "Store4"});
+  } else if (type == "AppendStructuredBuffer") {
+    add({"Append", "GetDimensions"});
+  } else if (type == "ConsumeStructuredBuffer") {
+    add({"Consume", "GetDimensions"});
+  } else if (type == "PointStream" || type == "LineStream" || type == "TriangleStream") {
+    add({"Append", "RestartStrip"});
+  }
+  std::vector<const ref::Entry *> result;
+  for (std::string_view name : names) {
+    if (const ref::Entry *entry = findExact(kMethods, name))
+      result.push_back(entry);
+  }
+  return result;
+}
+std::optional<Shape> numericShape(std::string_view name) {
+  static const std::string_view kUnityScalars[] = {"real", "fixed"};
+  auto dimension = [](char c) { return c >= '1' && c <= '4'; };
+  auto shapeOf = [&](std::string_view scalar) -> std::optional<Shape> {
+    if (!name.starts_with(scalar))
+      return std::nullopt;
+    std::string_view rest = name.substr(scalar.size());
+    if (rest.empty())
+      return Shape{std::string(scalar), 1, 0};
+    if (rest.size() == 1 && dimension(rest[0]))
+      return Shape{std::string(scalar), rest[0] - '0', 0};
+    if (rest.size() == 3 && dimension(rest[0]) && rest[1] == 'x' && dimension(rest[2]))
+      return Shape{std::string(scalar), rest[0] - '0', rest[2] - '0'};
+    return std::nullopt;
+  };
+  // Longest first, so min16float is not read as a malformed min16int.
+  std::optional<Shape> best;
+  for (const ref::Entry &scalar : kScalars) {
+    if (auto shape = shapeOf(scalar.name); shape && (!best || shape->scalar.size() > best->scalar.size()))
+      best = shape;
+  }
+  for (std::string_view scalar : kUnityScalars) {
+    if (auto shape = shapeOf(scalar); shape && !best)
+      best = shape;
+  }
+  return best;
+}
 std::optional<TypeDoc> describeType(std::string_view name) {
   if (const ref::Entry *entry = findExact(kResourceTypes, name))
     return TypeDoc{std::string(entry->detail), std::string(entry->doc)};

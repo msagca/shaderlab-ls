@@ -39,18 +39,27 @@ add_executable(shaderlab-ls
   src/lsp/transport.cpp
   src/lsp/server.cpp
   src/lsp/features.cpp
+  src/lsp/workspace.cpp
+  src/lsp/semantic_tokens.cpp
   src/shaderlab/lexer.cpp
   src/shaderlab/parser.cpp
   src/shaderlab/reference.cpp
+  src/hlsl/lexer.cpp
   src/hlsl/scanner.cpp
+  src/hlsl/scopes.cpp
   src/hlsl/builtins.cpp
   src/unity/project.cpp
+  src/index/files.cpp
+  src/index/index.cpp
+  src/format/diff.cpp
   src/format/formatter.cpp
   src/format/style.cpp
   src/compiler/dxc.cpp
   src/compiler/fxc.cpp
   src/analysis/analysis.cpp
   src/analysis/hlsl_check.cpp
+  src/analysis/conditionals.cpp
+  src/analysis/variant.cpp
 )
 
 # The executable goes straight into build/ whatever the generator: a multi-config one, such as Visual Studio, would otherwise put it in build/Release/,

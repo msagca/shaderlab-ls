@@ -1,4 +1,5 @@
 #include "analysis/hlsl_check.h"
+#include "analysis/variant.h"
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -284,33 +285,17 @@ namespace {
       }
       return std::nullopt;
     }
-    // Unity's default variant: the first keyword of each set, unless the set allows "all off".
+    // The variant's keywords: the document's choice, the `keywords` setting's, or Unity's default variant.
     void selectKeywords(const HlslPragma &pragma, std::vector<ShaderDefine> &defines, std::vector<std::string> &dynamic) {
-      std::vector<std::string> keywords;
-      for (const PragmaArg &arg : pragma.args)
-        keywords.push_back(arg.text);
-      if (keywords.empty())
-        return;
-      auto isNone = [](const std::string &k) { return k.find_first_not_of('_') == std::string::npos; };
       if (pragma.name.rfind("dynamic_branch", 0) == 0) {
-        for (const std::string &k : keywords) {
-          if (!isNone(k))
-            dynamic.push_back(k);
+        for (const PragmaArg &arg : pragma.args) {
+          if (!isNoKeyword(arg.text))
+            dynamic.push_back(arg.text);
         }
         return;
       }
-      bool chosen = false;
-      for (const std::string &k : keywords) {
-        if (std::find(options_.keywords.begin(), options_.keywords.end(), k) != options_.keywords.end()) {
-          defines.push_back({k, "1"});
-          chosen = true;
-        }
-      }
-      if (chosen)
-        return;
-      bool singleFeature = pragma.name.rfind("shader_feature", 0) == 0 && keywords.size() == 1;
-      if (!isNone(keywords[0]) && !singleFeature)
-        defines.push_back({keywords[0], "1"});
+      for (const std::string &keyword : enabledKeywords(pragma, {options_.variant, options_.keywords}))
+        defines.push_back({keyword, "1"});
     }
     void add(Span span, Severity severity, std::string message, std::string code = {}, std::optional<RelatedLocation> related = std::nullopt) {
       Diagnostic diagnostic;

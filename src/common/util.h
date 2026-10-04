@@ -17,4 +17,6 @@ std::string pathToUri(const std::filesystem::path &path);
 std::string pathKey(const std::filesystem::path &path);
 // Absolute path with forward slashes, preserving case: for #line directives and display.
 std::string displayPath(const std::filesystem::path &path);
+// An environment variable's value, empty when it is not set.
+std::string environmentVariable(const char *name);
 } // namespace sls

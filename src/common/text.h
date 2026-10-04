@@ -33,6 +33,7 @@ struct Diagnostic {
   std::string code;
   std::string source = "shaderlab";
   std::optional<RelatedLocation> related;
+  bool unnecessary = false; // code that does nothing, which editors fade out
 };
 // Position encodings negotiated with the client (LSP 3.17 positionEncoding).
 enum class Encoding { Utf8,

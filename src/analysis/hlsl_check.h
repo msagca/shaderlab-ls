@@ -17,6 +17,7 @@ struct CheckOptions {
   std::filesystem::path dxcLibrary; // tried before the Unity editor's DXC and the system's
   CompilerChoice compiler = CompilerChoice::Auto;
   std::vector<std::string> keywords; // shader keywords to treat as enabled
+  std::vector<std::string> variant; // the document's own choice of keywords, before `keywords`
   std::vector<ShaderDefine> defines; // extra macros for every compile
 };
 // The compilers there are for `file`: FXC where it exists, and the first DXC that loads from options.dxcLibrary,

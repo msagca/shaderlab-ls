@@ -25,6 +25,8 @@ vim.opt.swapfile = false
 -- which belongs in a test run. Everything here is therefore the build path, which the fixture's own build script
 -- stands in for.
 vim.g.shaderlab_ls_download = false
+-- Nor do the throwaway projects belong in the user's cache folder.
+vim.lsp.config('shaderlab_ls', { init_options = { indexCache = false } })
 
 vim.api.nvim_create_autocmd('LspAttach', {
   callback = function(event) log(('attach buf=%d client=%d'):format(event.buf, event.data.client_id)) end,
@@ -298,6 +300,30 @@ cases.health = function()
   vim.cmd 'checkhealth shaderlab-ls'
   for _, line in ipairs(vim.api.nvim_buf_get_lines(0, 0, -1, false)) do log('health ' .. line) end
   finish()
+end
+
+-- Semantic tokens for the languages no tree-sitter parser is installed for, and none for the others. Which parsers
+-- there are is made up, whatever the machine running the tests has installed: language.add is what the config asks.
+cases.semantic_tokens = function()
+  vim.treesitter.language.add = function(lang) return lang == 'hlsl' or nil end
+  vim.lsp.enable 'shaderlab_ls'
+  local buffers = {}
+  for _, name in ipairs { 'test.shader', 'unity.hlsl' } do
+    open(name)
+    buffers[name] = vim.api.nvim_get_current_buf()
+  end
+  until_(function()
+    for _, buffer in pairs(buffers) do
+      if not vim.lsp.get_clients({ bufnr = buffer })[1] then return false end
+    end
+    for name, buffer in pairs(buffers) do
+      local client = vim.lsp.get_clients({ bufnr = buffer })[1]
+      local response = client:request_sync('textDocument/semanticTokens/full', { textDocument = vim.lsp.util.make_text_document_params(buffer) }, 5000, buffer)
+      local data = response and response.result and response.result.data or {}
+      log(('tokens %s %d'):format(name, #data))
+    end
+    return true
+  end)
 end
 
 -- Cases run once startup is over, not while this file is being read: filetype detection and the fixture's own

@@ -154,7 +154,7 @@ def main():
             "general": {"positionEncodings": ["utf-16"]},
             "textDocument": {"completion": {"completionItem": {"snippetSupport": True}}},
         },
-        "initializationOptions": {"diagnostics": {"delay": 0}, **({"dxcPath": find_dxc()} if find_dxc() else {})},
+        "initializationOptions": {"diagnostics": {"delay": 0}, "indexCache": False, **({"dxcPath": find_dxc()} if find_dxc() else {})},
     })
     client.notify("initialized", {})
     global compiler, has_dxc
@@ -192,11 +192,103 @@ def main():
     else:
         skip("compile errors mapped into the Pass")
     check(not any(x["range"]["start"]["line"] == 14 for x in d), "valid Blend with a property reference")
+    missing = next((x for x in d if "'_Missing' is not declared" in x["message"]), None)
+    fixes = client.request("textDocument/codeAction", {"textDocument": {"uri": uri}, "range": missing["range"] if missing else {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}},
+                                                       "context": {"diagnostics": [missing] if missing else []}})
+    fix = next((a for a in fixes if a["title"] == "Declare _Missing in Properties"), None)
+    edit = fix["edit"]["changes"][uri][0] if fix else {}
+    check(fix is not None and fix["kind"] == "quickfix" and '_Missing ("_Missing", Float) = 0' in edit.get("newText", ""),
+          "a quick fix declares an undeclared property")
 
     print("valid.shader")
     valid_uri = open_doc(client, FIXTURES / "valid.shader")
     d = diags(client, valid_uri)
+    faded = [x for x in d if x.get("tags") == [1]]
+    d = [x for x in d if x.get("tags") != [1]]
     check(d == [], "no diagnostics for a valid shader: " + "; ".join(x["message"] for x in d))
+    check([(x["range"]["start"]["line"], x["severity"]) for x in faded] == [(67, 4)],
+          "the #ifdef branch the default variant leaves out is faded, and nothing else")
+
+    print("variants")
+    variant_uri = uri_for(FIXTURES / "unsaved_variant.shader")
+    # An error only the _EMISSION variant compiles.
+    variant_text = (FIXTURES / "valid.shader").read_text(encoding="utf-8").replace("_BaseColor * 2.0", "_BaseColor * missingInEmission")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": variant_uri, "languageId": "shaderlab", "version": 1, "text": variant_text}})
+    diags(client, variant_uri)
+
+    def actions_on(line, diagnostics=()):
+        return client.request("textDocument/codeAction", {"textDocument": {"uri": variant_uri},
+                              "range": {"start": {"line": line, "character": 0}, "end": {"line": line, "character": 0}},
+                              "context": {"diagnostics": list(diagnostics)}})
+
+    compiled = []
+
+    def faded_lines():
+        found = diags(client, variant_uri)
+        compiled[:] = [x["message"] for x in found if x.get("source") in ("fxc", "dxc")]
+        return sorted(x["range"]["start"]["line"] for x in found if x.get("tags") == [1])
+
+    titles = [a["title"] for a in actions_on(46)]
+    check(titles == ["Check the variant with _EMISSION"], "a keyword set offers its other variants: " + str(titles))
+    check([a["title"] for a in actions_on(47)] == ["Check the variant with _ALPHATEST_ON"], "so does a lone shader_feature")
+    emission = actions_on(46)[0]["command"]
+    client.request("workspace/executeCommand", {"command": emission["command"], "arguments": emission["arguments"]})
+    check(faded_lines() == [69], "the chosen variant decides which branch is faded")
+    if compiler:
+        check(any("missingInEmission" in m and "[variant: _EMISSION]" in m for m in compiled), "and is the one compiled, named on what it reports")
+    else:
+        skip("the chosen variant is compiled")
+    titles = [a["title"] for a in actions_on(46)]
+    check(titles == ["Check the variant without _EMISSION", "Check the default variant again"], "and can be undone: " + str(titles))
+    client.request("workspace/executeCommand", {"command": emission["command"], "arguments": [variant_uri]})
+    check(faded_lines() == [67] and not compiled, "back to the default variant, which has no such error")
+
+    include_uri = uri_for(FIXTURES / "unsaved_conditions.hlsl")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": include_uri, "languageId": "hlsl", "version": 1, "text": "\n".join([
+        "#define ON 1",
+        "#if ON == 2",
+        "float never;",
+        "#endif",
+        "#ifdef DEFINED_BY_THE_INCLUDER",
+        "float maybe;",
+        "#endif",
+        "#if !defined(ON) || defined(SHADER_API_D3D11) && 0",
+        "float neither;",
+        "#elif 1",
+        "float always;",
+        "#else",
+        "float after;",
+        "#endif",
+    ])}})
+    hints = [x["range"]["start"]["line"] for x in client.diagnostics(include_uri, 1) if x.get("tags") == [1]]
+    check(hints == [2, 8, 12], "an include file fades what is false for certain, not what its includer may define: " + str(hints))
+
+    variant_kernel = "\n".join([
+        "#pragma kernel K",
+        "#pragma multi_compile _ _FANCY",
+        "struct S { float3 a;",
+        "#ifdef _FANCY",
+        "    float4 fancy;",
+        "#endif",
+        "};",
+        "#ifdef _FANCY",
+        "half4 v;",
+        "#else",
+        "float2 v;",
+        "#endif",
+        "[numthreads(1, 1, 1)] void K() { S s; s.; v.; }",
+    ])
+    kernel_uri = uri_for(FIXTURES / "unsaved_variant_kernel.compute")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": kernel_uri, "languageId": "hlsl", "version": 1, "text": variant_kernel}})
+    last = variant_kernel.split("\n")[-1]
+
+    def kernel_members(needle):
+        position = {"line": 12, "character": last.index(needle) + len(needle)}
+        return labels(client.request("textDocument/completion", {"textDocument": {"uri": kernel_uri}, "position": position}))
+
+    check(kernel_members("s.") == {"a"}, "a field an #if leaves out of the variant is not offered")
+    check("y" in kernel_members("v.") and "z" not in kernel_members("v."), "of two declarations, the one the variant compiles is used")
+
 
     print("unity_compat.shader")
     compat_uri = open_doc(client, FIXTURES / "unity_compat.shader")
@@ -308,6 +400,43 @@ def main():
     lines = source.decode("utf-8").split("\n")
     check(len(edits) == 1 and edits[0]["newText"] == expected.decode("utf-8")
           and edits[0]["range"]["end"]["line"] == len(lines) - 1, "LSP formatting returns the whole formatted document")
+    # Range formatting: the lines of a range come out as whole-file formatting would leave them, and no others.
+    source_text = source.decode("utf-8")
+    expected_text = expected.decode("utf-8")
+
+    def apply(text, edits):
+        lines = text.split("\n")
+        offsets = [0]
+        for line in lines:
+            offsets.append(offsets[-1] + len(line) + 1)
+        def offset(position):
+            return offsets[position["line"]] + position["character"] if position["line"] < len(lines) else len(text)
+        for edit in sorted(edits, key=lambda e: offset(e["range"]["start"]), reverse=True):
+            text = text[:offset(edit["range"]["start"])] + edit["newText"] + text[offset(edit["range"]["end"]):]
+        return text
+
+    def range_format(first, last):
+        return client.request("textDocument/rangeFormatting", {
+            "textDocument": {"uri": format_uri}, "options": {"tabSize": 4, "insertSpaces": True},
+            "range": {"start": {"line": first, "character": 0}, "end": {"line": last, "character": 1}}})
+
+    source_lines = source_text.split("\n")
+    total = len(source_lines)
+    whole = apply(source_text, range_format(0, total - 1))
+    check(whole == expected_text, "range formatting over every line formats the whole file")
+    pieces = source_text
+    for first in range(0, total, 7):
+        client.notify("textDocument/didChange", {"textDocument": {"uri": format_uri, "version": 2 + first},
+                                                 "contentChanges": [{"text": pieces}]})
+        pieces = apply(pieces, range_format(first, min(first + 6, total - 1)) if first < len(pieces.split("\n")) else [])
+    client.notify("textDocument/didChange", {"textDocument": {"uri": format_uri, "version": 1000}, "contentChanges": [{"text": pieces}]})
+    rest = range_format(0, len(pieces.split("\n")) - 1)
+    check(apply(pieces, rest) == expected_text, "formatting a file range by range ends where formatting it whole does")
+    client.notify("textDocument/didChange", {"textDocument": {"uri": format_uri, "version": 1001}, "contentChanges": [{"text": source_text}]})
+    one = range_format(3, 3)
+    touched = {line for e in one for line in range(e["range"]["start"]["line"], max(e["range"]["end"]["line"], e["range"]["start"]["line"] + 1))}
+    alone = bool(one) and touched <= {3}
+    check(alone, "a one-line range changes that line alone" + ("" if alone else ": " + json.dumps(one)))
     hlsl_uri = uri_for(unstyled / "unsaved_kernel.compute")
     client.notify("textDocument/didOpen",
                   {"textDocument": {"uri": hlsl_uri, "languageId": "hlsl", "version": 1, "text": hlsl.decode("utf-8")}})
@@ -494,6 +623,88 @@ def main():
     passes = shader["children"][2]["children"] if len(names) >= 3 else []
     check(any(p["name"] == 'Pass "ForwardLit"' for p in passes), "pass names in outline")
 
+    print("members")
+    members_source = "\n".join([
+        "struct Light { float3 direction; half4 color; };",
+        "struct Surface { float3 normal; Light light; };",
+        "StructuredBuffer<Light> _Lights;",
+        "Texture2D<float> _Mask; Texture2D _Albedo; SamplerState sampler_Albedo;",
+        "TEXTURE2D(_BaseMap);",
+        "RWByteAddressBuffer _Raw;",
+        "float4x4 _Matrix;",
+        "Surface GetSurface() { Surface s = (Surface)0; return s; }",
+        "float4 frag(Surface surface, float2 uv : TEXCOORD0) : SV_Target",
+        "{",
+        "    float3 n = surface.normal, m = n;",
+        "    Light first = _Lights[0];",
+        "    float k = surface.light.color.x + _Lights[1].color.r + first.direction.y + m.z + GetSurface().light.color.a;",
+        "    return _Albedo.Sample(sampler_Albedo, uv) + _BaseMap.Sample(sampler_Albedo, uv) + _Mask.Load(0).x + _Matrix._m00 + 1.5;",
+        "}",
+    ])
+    members_uri = uri_for(FIXTURES / "unsaved_members.hlsl")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": members_uri, "languageId": "hlsl", "version": 1, "text": members_source}})
+    members_lines = members_source.split("\n")
+
+    def members_at(needle, occurrence=0):
+        """Completion just after the '.' that ends `needle`."""
+        line = next(i for i, text in enumerate(members_lines) if needle in text)
+        index = -1
+        for _ in range(occurrence + 1):
+            index = members_lines[line].index(needle, index + 1)
+        position = {"line": line, "character": index + len(needle)}
+        return labels(client.request("textDocument/completion", {"textDocument": {"uri": members_uri}, "position": position}))
+
+    check(members_at("surface.") == {"normal", "light"}, "a parameter's struct fields")
+    check(members_at("surface.light.") == {"direction", "color"}, "a field's struct fields")
+    check({"x", "y", "z", "w", "r", "g", "b", "a", "xyzw", "rgb"} <= members_at("surface.light.color."), "a vector's components")
+    check("w" not in members_at("first.direction."), "only as many components as the vector has")
+    check(members_at("_Lights[1].") == {"direction", "color"}, "an element of a StructuredBuffer of structs")
+    check(members_at("first.") == {"direction", "color"}, "a local declared from an indexed buffer")
+    check("z" in members_at("m.") and "w" not in members_at("m."), "the second name of a declaration with two")
+    check(members_at("GetSurface().light.") == {"direction", "color"}, "through a function's return type")
+    albedo = members_at("_Albedo.")
+    check({"Sample", "SampleLevel", "Load", "Gather", "GetDimensions"} <= albedo and "Store" not in albedo, "a texture's methods")
+    check("Sample" in members_at("_BaseMap."), "a texture declared with Unity's TEXTURE2D macro")
+    check(members_at("_Mask.Load(0).") == {"x", "r"}, "what a texture's Load returns, from its <T>")
+    check({"_m00", "_m33"} <= members_at("_Matrix."), "a matrix's elements")
+    check(members_at("1.") == set(), "nothing after the '.' of a number")
+    members_lines.append("void f() { _Raw. }")
+    client.notify("textDocument/didChange", {"textDocument": {"uri": members_uri, "version": 2},
+                                             "contentChanges": [{"text": "\n".join(members_lines)}]})
+    check({"Store4", "Load2"} <= members_at("_Raw."), "a raw buffer's methods")
+
+    def member_line(needle, skip):
+        line = next(i for i, text in enumerate(members_lines) if needle in text)
+        return {"textDocument": {"uri": members_uri}, "position": {"line": line, "character": members_lines[line].index(needle) + skip}}
+
+    definition = client.request("textDocument/definition", member_line("first.direction", 7))
+    check(definition is not None and definition["range"]["start"]["line"] == 0, "definition of a member goes to its struct's field")
+    hover = client.request("textDocument/hover", member_line("surface.light.color", 14))
+    check(hover is not None and "half4 color" in hover["contents"]["value"], "hover on a member shows its field")
+
+    print("signature help")
+
+    def signature_at(uri, lines, needle, skip):
+        line = next(i for i, text in enumerate(lines) if needle in text)
+        position = {"line": line, "character": lines[line].index(needle) + skip}
+        return client.request("textDocument/signatureHelp", {"textDocument": {"uri": uri}, "position": position})
+
+    sample = signature_at(members_uri, members_lines, "_Albedo.Sample(sampler_Albedo, uv)", len("_Albedo.Sample(sampler_Albedo, "))
+    shown = sample["signatures"][sample["activeSignature"]] if sample else {}
+    label = shown.get("label", "")
+    params = [label[b:e] for b, e in (p["label"] for p in shown.get("parameters", []))]
+    check("Sample(" in label and sample["activeParameter"] == 1 and params[:2] == ["SamplerState s", "location"],
+          "a method's signature, on its second parameter: " + str(params[:3]))
+    nested = signature_at(members_uri, members_lines, "GetSurface().light", len("GetSurface("))
+    check(nested is not None and nested["signatures"][0]["label"].startswith("Surface GetSurface()") and nested["activeParameter"] == 0,
+          "a function of the document")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": intrinsic_uri, "languageId": "hlsl", "version": 2,
+                                                            "text": "float f(float x) { return lerp(x, sqrt(x), 0.5); }\n"}})
+    inner = client.request("textDocument/signatureHelp", {"textDocument": {"uri": intrinsic_uri}, "position": {"line": 0, "character": 39}})
+    outer = client.request("textDocument/signatureHelp", {"textDocument": {"uri": intrinsic_uri}, "position": {"line": 0, "character": 44}})
+    check(inner is not None and inner["signatures"][0]["label"].startswith("T sqrt") and inner["activeParameter"] == 0, "an intrinsic, inside another call")
+    check(outer is not None and outer["signatures"][0]["label"].startswith("T lerp") and outer["activeParameter"] == 2, "and the call around it, on its third parameter")
+
     print("references / highlights / rename")
     refs_source = "\n".join([
         'Shader "Tests/References"',
@@ -583,6 +794,41 @@ def main():
     check(lines_of(output) == [28, 29, 30, 31] and len(output) == 4, "a local is found only in the function it is used in")
     check(lines_of(references(at("uv", line_has="input.uv *"))) == [21, 22, 30, 35], "a member is found by name, in every struct")
 
+    scoped_source = "\n".join([
+        "float shade;",
+        "float f(float x)",
+        "{",
+        "    float shade = x;",
+        "    for (int i = 0; i < 2; ++i) { float t = i; shade += t; }",
+        "    for (int i = 0; i < 3; ++i) shade += i;",
+        "    { float t = 2, u = t; shade *= u; }",
+        "    return shade;",
+        "}",
+        "float g() { return shade; }",
+    ])
+    scoped_uri = uri_for(FIXTURES / "unsaved_scopes.hlsl")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": scoped_uri, "languageId": "hlsl", "version": 1, "text": scoped_source}})
+    scoped_lines = scoped_source.split("\n")
+
+    def scoped(line, needle, occurrence=0):
+        index = -1
+        for _ in range(occurrence + 1):
+            index = scoped_lines[line].index(needle, index + 1)
+        return {"textDocument": {"uri": scoped_uri}, "position": {"line": line, "character": index}}
+
+    def spots(result):
+        return sorted((r["range"]["start"]["line"], r["range"]["start"]["character"]) for r in result or [])
+
+    first_i = spots(references(scoped(4, "i ")))
+    check(len(first_i) == 4 and {line for line, _ in first_i} == {4}, "a for loop's variable is its own, not the next loop's: " + str(first_i))
+    check({line for line, _ in spots(references(scoped(5, "i ")))} == {5}, "and the next loop's is its own")
+    check(spots(references(scoped(4, "t ="))) == [(4, 40), (4, 56)], "a block's local is not its sibling block's")
+    check(lines_of(references(scoped(6, "u ="))) == [6], "the second name of a declaration is a local too")
+    check(lines_of(references(scoped(3, "shade"))) == [3, 4, 5, 6, 7], "a local that shadows a global has uses of its own")
+    check(lines_of(references(scoped(0, "shade"))) == [0, 9], "and the global keeps the rest")
+    global_edits = client.request("textDocument/rename", {**scoped(9, "shade"), "newName": "tone"})["changes"][scoped_uri]
+    check(sorted(e["range"]["start"]["line"] for e in global_edits) == [0, 9], "renaming the global leaves the local that shadows it alone")
+
     highlights = client.request("textDocument/documentHighlight", at("_Flag", 1, "Cull"))
     check(sorted((h["range"]["start"]["line"], h["kind"]) for h in highlights or []) == [(6, 3), (14, 2)],
           "highlights mark the property's declaration as written and its uses as read")
@@ -618,6 +864,250 @@ def main():
         ("2fast", "not a valid identifier", "an invalid identifier"),
     ]:
         check(fragment in refused("textDocument/rename", {**at("_Color", line_has="(\"Color\""), "newName": new_name}), f"rename refuses {description}")
+
+    print("semantic tokens")
+    legend = caps.get("semanticTokensProvider", {}).get("legend", {})
+    check(bool(legend.get("tokenTypes")), "semantic tokens are offered by default")
+    data = client.request("textDocument/semanticTokens/full", {"textDocument": {"uri": refs_uri}})["data"]
+    tokens = {}
+    line = character = 0
+    for i in range(0, len(data), 5):
+        delta_line, delta_character, length, kind, modifiers = data[i:i + 5]
+        line += delta_line
+        character = character + delta_character if delta_line == 0 else delta_character
+        names = {name for bit, name in enumerate(legend["tokenModifiers"]) if modifiers & (1 << bit)}
+        tokens[(line, character)] = (length, legend["tokenTypes"][kind], names)
+
+    def token(needle, skip=0, line_has=None):
+        position = at(needle, skip, line_has)["position"]
+        return tokens.get((position["line"], position["character"]), (0, None, set()))
+
+    for case in [
+        ("Shader", None, "keyword", set(), "a ShaderLab keyword"),
+        ("_Color", "(\"Color\"", "property", {"declaration"}, "a material property's declaration"),
+        ("Color)", None, "type", set(), "a property type"),
+        ("HDR", None, "decorator", set(), "a property attribute"),
+        ("Cull", None, "keyword", set(), "a render state command"),
+        ("_Flag", "Cull", "property", set(), "a [property] reference"),
+        ("HLSLPROGRAM", None, "keyword", set(), "a code block keyword"),
+        ("#pragma", "vertex", "keyword", set(), "a directive"),
+        ("vertex vert", "#pragma", "function", set(), "an entry point in a pragma", 7),
+        ("struct", "Attributes {", "keyword", set(), "an HLSL keyword"),
+        ("Attributes", "struct", "struct", {"declaration"}, "a struct's declaration"),
+        ("float4", "Attributes {", "type", {"defaultLibrary"}, "a built-in type"),
+        ("POSITION", "Attributes {", "decorator", set(), "a semantic"),
+        ("position", "Attributes {", "property", {"declaration"}, "a field's declaration"),
+        ("vert", "Varyings vert", "function", {"declaration"}, "a function's declaration"),
+        ("input", "Varyings vert", "parameter", {"declaration"}, "a parameter's declaration"),
+        ("input", "output.position = input", "parameter", set(), "a parameter"),
+        ("output", "Varyings output", "variable", {"declaration"}, "a local's declaration"),
+        ("position", "output.position = input", "property", set(), "a member"),
+        ("Sample", "_MainTex.Sample", "method", set(), "a method"),
+        ("Shared", "Shared(1)", "function", set(), "a function from HLSLINCLUDE"),
+        ("// _Color", None, "comment", set(), "a comment"),
+        ("0", "Shared(2)", "number", set(), "a number"),
+    ]:
+        needle, line_has, kind, modifiers, description, *skip = case
+        length, kind_found, modifiers_found = token(needle, skip[0] if skip else 0, line_has)
+        check(kind_found == kind and modifiers <= modifiers_found, f"semantic token for {description}"
+              + ("" if kind_found == kind else f": {kind_found}"))
+    quiet = Client(exe)
+    quiet_init = quiet.request("initialize", {"processId": None, "rootUri": None, "capabilities": {}, "initializationOptions": {"semanticTokens": False}})
+    check("semanticTokensProvider" not in quiet_init["capabilities"], "semanticTokens = false leaves them out, for an editor with a grammar")
+    quiet.request("shutdown", None)
+    quiet.notify("exit", None)
+    quiet.proc.wait(timeout=10)
+
+    print("workspace references / rename")
+    workspace_dir = tempfile.TemporaryDirectory()
+    top = pathlib.Path(workspace_dir.name).resolve()
+    project = top / "Project"
+    files = {
+        "Shaders/Common.hlsl": '#include "../../External/Ext.hlsl"\nfloat4 _Tint;\nfloat3 Brighten(float3 c) { return c * _Tint.rgb; }\n',
+        "Shaders/A.shader": "\n".join([
+            'Shader "A"',
+            "{",
+            '    Properties { _Tint ("Tint", Color) = (1, 1, 1, 1) }',
+            "    SubShader { Pass {",
+            "        HLSLPROGRAM",
+            "        #pragma vertex vert",
+            "        #pragma fragment frag",
+            '        #include "Common.hlsl"',
+            "        float4 vert(float4 p : POSITION) : SV_POSITION { return p; }",
+            "        float4 frag() : SV_Target { return float4(Brighten(_Tint.rgb) + Outside(1), 1); }",
+            "        ENDHLSL",
+            "    } }",
+            "}",
+        ]),
+        "Shaders/B.compute": '#pragma kernel K\n#include "Common.hlsl"\nRWTexture2D<float4> _Out;\n[numthreads(1, 1, 1)] void K() { _Out[uint2(0, 0)] = float4(Brighten(1), 1); }\n',
+        "Shaders/C.shader": 'Shader "C" { SubShader { Pass { HLSLPROGRAM\nfloat3 Brighten(float3 c) { return c; }\nENDHLSL } } }\n',
+        "Shaders/E.shader": 'Shader "E" { Properties { _Tint ("Tint", Color) = (1, 1, 1, 1) } SubShader { Pass { HLSLPROGRAM\n#include "Common.hlsl"\nfloat4 f() { return _Tint; }\nENDHLSL } } }\n',
+        "Library/D.hlsl": '#include "../Shaders/Common.hlsl"\nfloat3 g() { return Brighten(1); }\n',
+    }
+    for name, text in files.items():
+        (project / name).parent.mkdir(parents=True, exist_ok=True)
+        (project / name).write_text(text, encoding="utf-8", newline="\n")
+    (top / "External").mkdir()
+    (top / "External" / "Ext.hlsl").write_text("float Outside(float x) { return x; }\n", encoding="utf-8", newline="\n")
+    client.notify("workspace/didChangeWorkspaceFolders", {"event": {"added": [{"uri": uri_for(project), "name": "Project"}], "removed": []}})
+
+    def path_of(uri):
+        from urllib.parse import unquote, urlparse
+        path = unquote(urlparse(uri).path)
+        return str(pathlib.Path(path.lstrip("/") if sys.platform == "win32" else path).resolve()).lower()
+
+    def where(name):
+        return str((project / name).resolve()).lower()
+
+    a_lines = files["Shaders/A.shader"].split("\n")
+    a_uri = open_doc(client, project / "Shaders/A.shader")
+
+    def in_a(needle, line_has=None):
+        line = next(i for i, text in enumerate(a_lines) if needle in text and (line_has is None or line_has in text))
+        return {"textDocument": {"uri": a_uri}, "position": {"line": line, "character": a_lines[line].index(needle) + 1}}
+
+    brighten = references(in_a("Brighten"))
+    reached = {path_of(r["uri"]) for r in brighten or []}
+    expected_files = {where("Shaders/Common.hlsl"), where("Shaders/A.shader"), where("Shaders/B.compute")}
+    check(reached == expected_files, "references reach the include file and every file including it, not a namesake nor Library"
+          + ("" if reached == expected_files else ": " + str(sorted(reached))))
+    check(len(brighten) == 3 and len(references(in_a("Brighten"), include=False)) == 2, "and know which is the declaration")
+
+    renamed_files = client.request("textDocument/rename", {**in_a("Brighten"), "newName": "Lighten"})["changes"]
+    check({path_of(u) for u in renamed_files} == reached and all(e["newText"] == "Lighten" for edits in renamed_files.values() for e in edits),
+          "a function from an include file in the workspace is renamed in all of them")
+    tint = client.request("textDocument/rename", {**in_a("_Tint", "Properties"), "newName": "_Color"})["changes"]
+    by_file = {path_of(u): edits for u, edits in tint.items()}
+    counts = {path: len(edits) for path, edits in by_file.items()}
+    expected_counts = {where("Shaders/Common.hlsl"): 2, where("Shaders/A.shader"): 2, where("Shaders/E.shader"): 2}
+    check(counts == expected_counts, "a property whose variable an include declares is renamed with it, in every shader binding it"
+          + ("" if counts == expected_counts else ": " + str(counts)))
+    check("outside the workspace" in refused("textDocument/prepareRename", in_a("Outside")), "a symbol declared outside the workspace can't be renamed")
+    check(lines_of(references(in_a("Outside"))) == [0, 9], "but its references are found, its declaration among them")
+    check("already in use" in refused("textDocument/rename", {**in_a("Brighten"), "newName": "_Out"}), "a new name in use in another file is refused")
+
+    symbols = client.request("workspace/symbol", {"query": "brtn"})
+    found = sorted((s["name"], pathlib.Path(path_of(s["location"]["uri"])).name) for s in symbols)
+    check(found == [("Brighten", "c.shader"), ("Brighten", "common.hlsl")], "workspace symbols match a name's letters in order, open or not: " + str(found))
+    shaders = {s["name"] for s in client.request("workspace/symbol", {"query": ""}) if s["kind"] == 5}
+    check({"A", "C", "E"} <= shaders, "and name the shaders")
+    help_line = next(i for i, text in enumerate(a_lines) if "Brighten(" in text)
+    included = client.request("textDocument/signatureHelp", {"textDocument": {"uri": a_uri}, "position": {"line": help_line, "character": a_lines[help_line].index("Brighten(") + 9}})
+    check(included is not None and "float3 Brighten(float3 c)" in included["signatures"][0]["label"], "signature help for a function from an include file")
+    common_uri = open_doc(client, project / "Shaders/Common.hlsl")
+    from_common = client.request("textDocument/rename", {"textDocument": {"uri": common_uri}, "position": {"line": 2, "character": 9}, "newName": "Lighten"})["changes"]
+    check({path_of(u) for u in from_common} == reached, "renaming in an include file reaches the files including it")
+    check(common_uri in from_common and a_uri in from_common, "open documents are addressed by the URIs the client opened them with")
+    print("index")
+    # An include file uses what a sibling declares: G.shader includes Input.hlsl, then Pass.hlsl, which uses its
+    # declarations without including it.
+    (project / "Shaders/Input.hlsl").write_text("float4 _Gloss;\nstruct Surf { float3 albedo; };\n", encoding="utf-8", newline="\n")
+    pass_text = "float4 Shade(Surf s) { return _Gloss * s.albedo.x; }\n"
+    (project / "Shaders/Pass.hlsl").write_text(pass_text, encoding="utf-8", newline="\n")
+    (project / "Shaders/G.shader").write_text('Shader "G" { SubShader { Pass { HLSLPROGRAM\n#include "Input.hlsl"\n#include "Pass.hlsl"\nENDHLSL } } }\n',
+                                              encoding="utf-8", newline="\n")
+    for name in ("Input.hlsl", "Pass.hlsl", "G.shader"):
+        client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(project / "Shaders" / name), "type": 1}]})
+    client.request("workspace/symbol", {"query": "Shade"})  # waits for the index to take the changes in
+    pass_uri = open_doc(client, project / "Shaders/Pass.hlsl")
+
+    def in_pass(needle, skip=0):
+        return {"textDocument": {"uri": pass_uri}, "position": {"line": 0, "character": pass_text.index(needle) + skip}}
+
+    hover = client.request("textDocument/hover", in_pass("_Gloss"))
+    check(hover is not None and "float4 _Gloss" in hover["contents"]["value"], "an include file sees what its includer declares before it")
+    definition = client.request("textDocument/definition", in_pass("Surf"))
+    check(definition is not None and path_of(definition["uri"]) == where("Shaders/Input.hlsl"), "and goes to it")
+    check(labels(client.request("textDocument/completion", in_pass("s.albedo", 2))) == {"albedo"}, "and completes its members")
+    gloss = client.request("textDocument/rename", {**in_pass("_Gloss"), "newName": "_Shine"})["changes"]
+    check({path_of(u) for u in gloss} == {where("Shaders/Input.hlsl"), where("Shaders/Pass.hlsl")},
+          "a sibling's declaration is renamed with its uses: " + str(sorted(pathlib.Path(path_of(u)).name for u in gloss)))
+    client.notify("textDocument/didClose", {"textDocument": {"uri": pass_uri}})
+
+    # A file the index learns of, and one it learns is gone.
+    (project / "Shaders/H.shader").write_text('Shader "H" { SubShader { Pass { HLSLPROGRAM\n#include "Common.hlsl"\nfloat3 h() { return Brighten(1); }\nENDHLSL } } }\n',
+                                              encoding="utf-8", newline="\n")
+    client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(project / "Shaders/H.shader"), "type": 1}]})
+    check(where("Shaders/H.shader") in {path_of(r["uri"]) for r in references(in_a("Brighten"))}, "a new file is found once it is reported")
+    (project / "Shaders/H.shader").unlink()
+    client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(project / "Shaders/H.shader"), "type": 3}]})
+    check(where("Shaders/H.shader") not in {path_of(r["uri"]) for r in references(in_a("Brighten"))}, "and not once it is reported deleted")
+
+    # An include file's conditions, worked out in the programs that include it.
+    cond_text = "\n".join([
+        "#ifdef _FEATURE",
+        "float featureOnly;",
+        "#endif",
+        "#if LOCAL_ON",
+        "float localOn;",
+        "#else",
+        "float localOff;",
+        "#endif",
+        "#ifdef NOTHING_DEFINES_THIS",
+        "float never;",
+        "#endif",
+        "",
+    ])
+    (project / "Shaders/Cond.hlsl").write_text(cond_text, encoding="utf-8", newline="\n")
+    (project / "Shaders/K.shader").write_text('Shader "K" { SubShader { Pass { HLSLPROGRAM\n#pragma multi_compile _ _FEATURE\n'
+                                              '#define LOCAL_ON 1\n#include "Cond.hlsl"\nENDHLSL } } }\n', encoding="utf-8", newline="\n")
+    for name in ("Cond.hlsl", "K.shader"):
+        client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(project / "Shaders" / name), "type": 1}]})
+    client.request("workspace/symbol", {"query": "featureOnly"})  # waits for the index
+    cond_uri = open_doc(client, project / "Shaders/Cond.hlsl")
+
+    def cond_faded(published):
+        return sorted(x["range"]["start"]["line"] for x in published if x.get("tags") == [1])
+
+    check(cond_faded(diags(client, cond_uri)) == [1, 6, 9],
+          "an include file's #if is worked out with its includer's variant and the #defines before its #include")
+    # A second includer that defines _FEATURE: what either compiles is not faded.
+    (project / "Shaders/L.shader").write_text('Shader "L" { SubShader { Pass { HLSLPROGRAM\n#define _FEATURE 1\n'
+                                              '#define LOCAL_ON 1\n#include "Cond.hlsl"\nENDHLSL } } }\n', encoding="utf-8", newline="\n")
+    client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(project / "Shaders/L.shader"), "type": 1}]})
+    check(cond_faded(diags(client, cond_uri)) == [6, 9], "and faded only where no includer compiles it, again when an includer appears")
+    client.notify("textDocument/didClose", {"textDocument": {"uri": cond_uri}})
+
+    for uri in (a_uri, common_uri):
+        client.notify("textDocument/didClose", {"textDocument": {"uri": uri}})
+    client.notify("workspace/didChangeWorkspaceFolders", {"event": {"added": [], "removed": [{"uri": uri_for(project), "name": "Project"}]}})
+
+    print("saved index")
+    # A server that saved the index on exit; the next one loads it and indexes only what changed meanwhile.
+    cache_dir = tempfile.TemporaryDirectory()
+    saved_project = tempfile.TemporaryDirectory()
+    saved_root = pathlib.Path(saved_project.name).resolve()
+    (saved_root / "One.hlsl").write_text("float First(float x) { return x; }\n", encoding="utf-8", newline="\n")
+    (saved_root / "Two.hlsl").write_text("float Second(float x) { return x; }\n", encoding="utf-8", newline="\n")
+    options = {"diagnostics": {"compiler": "none"}, "indexCache": cache_dir.name}
+
+    def session():
+        server = Client(exe)
+        server.request("initialize", {"processId": None, "rootUri": uri_for(saved_root), "capabilities": {}, "initializationOptions": options})
+        server.notify("initialized", {})
+        return server
+
+    def finish(server):
+        server.request("shutdown", None)
+        server.notify("exit", None)
+        server.proc.wait(timeout=10)
+
+    def logged(server):
+        return " ".join(m["params"]["message"] for m in server.pending if m.get("method") == "window/logMessage")
+
+    first = session()
+    check(len(first.request("workspace/symbol", {"query": "First"})) == 1, "a fresh index answers")
+    finish(first)
+    check(any(pathlib.Path(cache_dir.name).glob("*.idx")), "and is saved when the server exits")
+    time.sleep(0.05)
+    (saved_root / "Two.hlsl").write_text("float Third(float x) { return x; }\n", encoding="utf-8", newline="\n")
+    second = session()
+    found = {s["name"] for s in second.request("workspace/symbol", {"query": ""})}
+    check("files loaded from" in logged(second), "the next server loads it")
+    check({"First", "Third"} <= found and "Second" not in found, "and indexes again only the file that changed meanwhile: " + str(sorted(found)))
+    finish(second)
+    cache_dir.cleanup()
+    saved_project.cleanup()
 
     print("edits")
     client.notify("textDocument/didChange", {

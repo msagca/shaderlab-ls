@@ -1,4 +1,5 @@
 #include "common/util.h"
+#include <cstdlib>
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -107,6 +108,20 @@ std::string pathKey(const std::filesystem::path &path) {
   return toLower(displayPath(path)); // file names differing only in case are the same file
 #else
   return displayPath(path);
+#endif
+}
+std::string environmentVariable(const char *name) {
+#ifdef _MSC_VER
+  size_t size = 0;
+  char *value = nullptr;
+  if (_dupenv_s(&value, &size, name) != 0 || !value)
+    return {};
+  std::string result(value);
+  std::free(value);
+  return result;
+#else
+  const char *value = std::getenv(name);
+  return value ? std::string(value) : std::string();
 #endif
 }
 } // namespace sls

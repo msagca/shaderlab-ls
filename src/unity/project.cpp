@@ -60,18 +60,7 @@ namespace {
     return numbers;
   }
   std::string env(const char *name) {
-#ifdef _MSC_VER
-    size_t size = 0;
-    char *value = nullptr;
-    if (_dupenv_s(&value, &size, name) != 0 || !value)
-      return {};
-    std::string result(value);
-    std::free(value);
-    return result;
-#else
-    const char *value = std::getenv(name);
-    return value ? std::string(value) : std::string();
-#endif
+    return environmentVariable(name);
   }
   // The folder Unity Hub keeps its configuration in.
   fs::path hubConfigFolder() {

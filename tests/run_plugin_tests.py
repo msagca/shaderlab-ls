@@ -384,12 +384,19 @@ def main():
     report = [line[len("health "):] for line in lines if line.startswith("health ")]
     check(not any("Failed to run healthcheck" in line for line in report), "the check runs")
     check(all(any(line.startswith(section + " ~") for line in report)
-              for section in ("Neovim", "Server", "Formatting and compilers", "Filetypes", "GLSL blocks")),
+              for section in ("Neovim", "Server", "Formatting and compilers", "Filetypes", "Highlighting", "GLSL blocks")),
           "and reports every section")
     check(any(re.search(r"OK shaderlab-ls \S+ \(built", line) for line in report), "the executable is found and runs")
     check(any("OK current for this checkout" in line for line in report), "and is current")
     check(any("OK *.shader: shaderlab" in line for line in report), "the filetypes are checked")
     check(builds(lines) == 0, "and nothing is built by looking")
+
+    print("\nsemantic tokens beside tree-sitter")
+    fixture = fixture_for("semantic_tokens", server, stale=False)
+    lines, stderr = run("semantic_tokens", fixture, timeout=60)
+    ran_cleanly(lines, stderr, "semantic_tokens")
+    check(int(value(lines, "tokens test.shader", "0")) > 0, "a language with no tree-sitter parser gets the server's semantic tokens")
+    check(value(lines, "tokens unity.hlsl") == "0", "a language with a parser is left to tree-sitter")
 
     print()
     if failures:
