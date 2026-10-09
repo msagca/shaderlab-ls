@@ -368,6 +368,22 @@ def main():
     check(names.count("Pre") == 2 and "After" in names and "K" in names, "and each branch's header is a symbol, once: " + str(names))
     client.notify("textDocument/didClose", {"textDocument": {"uri": split_uri}})
 
+    # An include guard written as #if !defined(X) is no condition on what it guards, as with #ifndef X.
+    with tempfile.TemporaryDirectory() as temp:
+        folder = pathlib.Path(temp)
+        (folder / "guarded.hlsl").write_text("#ifndef GUARDED\n#define GUARDED\n#ifdef _Z\nfloat Pick() { return 2; }\n#endif\n#endif\n",
+                                             encoding="utf-8", newline="\n")
+        (folder / "plain.hlsl").write_text("#if !defined(PLAIN)\n#define PLAIN\nfloat Pick() { return 1; }\n#endif\n",
+                                           encoding="utf-8", newline="\n")
+        compute = folder / "guards.compute"
+        compute.write_text('#pragma kernel K\n#include "guarded.hlsl"\n#include "plain.hlsl"\n[numthreads(1, 1, 1)] void K() { Pick(); }\n',
+                           encoding="utf-8", newline="\n")
+        guards_uri = open_doc(client, compute)
+        target = client.request("textDocument/definition", {"textDocument": {"uri": guards_uri}, "position": {"line": 3, "character": 34}})
+        check(target is not None and target["uri"].endswith("plain.hlsl"),
+              "a definition under an #if !defined include guard alone is preferred to one under another #if")
+        client.notify("textDocument/didClose", {"textDocument": {"uri": guards_uri}})
+
 
     print("unity_compat.shader")
     compat_uri = open_doc(client, FIXTURES / "unity_compat.shader")
