@@ -464,7 +464,7 @@ std::vector<Guard> guardsAt(std::string_view text, Span range, size_t offset) {
     std::vector<Guard> earlier; // a guard for each branch so far, holding where that branch is compiled
     std::vector<Guard> branch; // the guards of the branch `offset` would be in
     size_t opened; // the directive that opened it, counted from the start
-    bool includeGuard = false; // #ifndef X followed by #define X
+    bool includeGuard = false; // #ifndef X or #if !defined(X), followed by #define X
   };
   std::vector<Block> blocks;
   size_t count = 0;
@@ -491,8 +491,12 @@ std::vector<Guard> guardsAt(std::string_view text, Span range, size_t offset) {
       blocks.pop_back();
     } else if (name == "define" && !blocks.empty()) {
       Block &block = blocks.back();
-      const Guard &opener = block.earlier.front();
-      if (block.opened + 1 == count && block.earlier.size() == 1 && !opener.holds && opener.condition == "defined(" + leadingName(rest) + ")")
+      if (block.opened + 1 != count || block.earlier.size() != 1)
+        continue;
+      // The opener needs the macro undefined and nothing else: #ifndef X, or #if !defined(X).
+      MacroState opener;
+      learn(block.earlier.front(), opener);
+      if (opener.defined.empty() && opener.undefined.size() == 1 && opener.undefined.count(leadingName(rest)))
         block.includeGuard = true;
     }
   }
