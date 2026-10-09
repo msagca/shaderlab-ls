@@ -314,6 +314,34 @@ def main():
         check(target is not None and target["range"]["start"]["line"] == expected, f"a call under {branch} goes to the definition that branch compiles")
     client.notify("textDocument/didClose", {"textDocument": {"uri": guarded_uri}})
 
+    # Two headers of one function in #if branches, each opening its body: the declarations after it are still found.
+    split_kernel = "\n".join([
+        "#pragma kernel K",
+        "#if defined(_A)",
+        "float4 Pre(float4 p) {",
+        "#elif defined(_B)",
+        "float4 Pre(float4 p, uint i) {",
+        "#endif",
+        "    return p;",
+        "}",
+        "#ifdef _A",
+        "float After() { return 1; }",
+        "#endif",
+        "[numthreads(1, 1, 1)] void K() {",
+        "#ifdef _A",
+        "    After();",
+        "#endif",
+        "}",
+    ])
+    split_uri = uri_for(FIXTURES / "unsaved_split_kernel.compute")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": split_uri, "languageId": "hlsl", "version": 1, "text": split_kernel}})
+    target = client.request("textDocument/definition", {"textDocument": {"uri": split_uri}, "position": {"line": 13, "character": 5}})
+    check(target is not None and target["range"]["start"]["line"] == 9, "a definition after a function with a header in each #if branch is found")
+    outline = client.request("textDocument/documentSymbol", {"textDocument": {"uri": split_uri}})
+    names = [s["name"] for s in outline]
+    check(names.count("Pre") == 2 and "After" in names and "K" in names, "and each branch's header is a symbol, once: " + str(names))
+    client.notify("textDocument/didClose", {"textDocument": {"uri": split_uri}})
+
 
     print("unity_compat.shader")
     compat_uri = open_doc(client, FIXTURES / "unity_compat.shader")
