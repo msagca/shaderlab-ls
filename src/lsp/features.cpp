@@ -119,12 +119,13 @@ namespace {
   std::vector<Guard> guardsAround(const Analysis &a, size_t unit, size_t offset) {
     return guardsAt(a.text, a.units[unit].range, offset);
   }
-  // A declaration a use can see: one whose #if the use's own conditions don't rule out, the fewer they leave
-  // unsettled the better; then one in code the variant compiles before one an #if leaves out; then by kind.
-  using DeclRank = std::tuple<bool, int, bool, int>;
+  // A declaration a use can see: one whose #if the use's own conditions don't rule out, and one they guarantee before
+  // one they leave unsettled; then one in code the variant compiles before one an #if leaves out; then the fewer
+  // conditions left unsettled the better; then by kind.
+  using DeclRank = std::tuple<bool, bool, bool, int, int>;
   DeclRank declRank(const HlslDecl &decl, std::string_view text, Span range, const std::vector<Guard> &use) {
     GuardFit fit = guardFit(guardsAt(text, range, decl.nameSpan.begin), use);
-    return {fit.excluded, fit.unsettled, !decl.active, declPriority(decl.kind)};
+    return {fit.excluded, fit.unsettled > 0, !decl.active, fit.unsettled, declPriority(decl.kind)};
   }
   const HlslDecl *bestDecl(const Analysis &a, size_t unit, const std::vector<const HlslDecl *> &candidates, const std::vector<Guard> &use) {
     const HlslDecl *best = nullptr;

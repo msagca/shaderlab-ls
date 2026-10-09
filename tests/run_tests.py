@@ -317,6 +317,29 @@ def main():
         check(target is not None and target["range"]["start"]["line"] == expected, f"a call under {branch} goes to the definition that branch compiles")
     client.notify("textDocument/didClose", {"textDocument": {"uri": guarded_uri}})
 
+    # A use whose own #if guarantees none of them: the variant decides, however deep each definition is nested.
+    nested_kernel = "\n".join([
+        "#pragma kernel K",
+        "#if defined(_A)",
+        "float Pick() { return 1; }",
+        "#else",
+        "#if defined(_B)",
+        "float Pick() { return 2; }",
+        "#else",
+        "float Pick() { return 3; }",
+        "#endif",
+        "#endif",
+        "[numthreads(1, 1, 1)] void K() {",
+        "    Pick();",
+        "}",
+    ])
+    nested_uri = uri_for(FIXTURES / "unsaved_nested_kernel.compute")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": nested_uri, "languageId": "hlsl", "version": 1, "text": nested_kernel}})
+    target = client.request("textDocument/definition", {"textDocument": {"uri": nested_uri}, "position": {"line": 11, "character": 5}})
+    check(target is not None and target["range"]["start"]["line"] == 7,
+          "a call no #if guards goes to the definition the variant compiles, though it is nested deeper than another")
+    client.notify("textDocument/didClose", {"textDocument": {"uri": nested_uri}})
+
     # Two headers of one function in #if branches, each opening its body: the declarations after it are still found.
     split_kernel = "\n".join([
         "#pragma kernel K",
