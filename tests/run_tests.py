@@ -305,11 +305,14 @@ def main():
         "#elif defined(_A)",
         "    Pick();",
         "#endif",
+        "#if defined(_B) && defined(_C)",
+        "    Pick();",
+        "#endif",
         "}",
     ])
     guarded_uri = uri_for(FIXTURES / "unsaved_guarded_kernel.compute")
     client.notify("textDocument/didOpen", {"textDocument": {"uri": guarded_uri, "languageId": "hlsl", "version": 1, "text": guarded_kernel}})
-    for line, expected, branch in [(10, 6, "#ifdef _B"), (12, 3, "#elif after it")]:
+    for line, expected, branch in [(10, 6, "#ifdef _B"), (12, 3, "#elif after it"), (15, 6, "#if that ands _B with more")]:
         target = client.request("textDocument/definition", {"textDocument": {"uri": guarded_uri}, "position": {"line": line, "character": 5}})
         check(target is not None and target["range"]["start"]["line"] == expected, f"a call under {branch} goes to the definition that branch compiles")
     client.notify("textDocument/didClose", {"textDocument": {"uri": guarded_uri}})
