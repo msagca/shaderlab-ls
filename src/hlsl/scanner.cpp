@@ -1,6 +1,8 @@
 #include "hlsl/scanner.h"
 #include <algorithm>
 #include <cctype>
+#include <optional>
+#include <set>
 #include "common/util.h"
 namespace sls {
 namespace {
@@ -130,6 +132,12 @@ namespace {
       Span whole{hash, lineEnd};
       if (!whole.empty() && src_[whole.end - 1] == '\r')
         --whole.end;
+      if (name == "if" || name == "ifdef" || name == "ifndef")
+        branches_.push_back({tokens_.size(), Branch::If});
+      else if (name == "elif" || name == "else")
+        branches_.push_back({tokens_.size(), Branch::Else});
+      else if (name == "endif")
+        branches_.push_back({tokens_.size(), Branch::Endif});
       if (name == "pragma") {
         skipSpaces();
         HlslPragma pragma;
@@ -192,12 +200,48 @@ namespace {
       CBuffer,
       Function,
       Initializer };
-    void walk() {
+    struct State {
       std::vector<const T *> statement;
       std::vector<const T *> member;
       std::vector<std::pair<Frame, std::string>> frames;
       std::string macroCBuffer;
+    };
+    // Each branch of an #if starts where the #if left off, so that alternatives such as two headers of one function,
+    // each opening its body, don't add up; after the #endif the code goes on from where the first branch ended.
+    struct Conditional {
+      State start;
+      std::optional<State> firstEnd;
+    };
+    void enterBranches(size_t k, size_t &next, State &state, std::vector<Conditional> &open) {
+      for (; next < branches_.size() && branches_[next].token <= k; ++next) {
+        switch (branches_[next].kind) {
+        case Branch::If:
+          open.push_back({state, std::nullopt});
+          break;
+        case Branch::Else:
+          if (!open.empty()) {
+            if (!open.back().firstEnd)
+              open.back().firstEnd = state;
+            state = open.back().start;
+          }
+          break;
+        case Branch::Endif:
+          if (!open.empty()) {
+            if (open.back().firstEnd)
+              state = std::move(*open.back().firstEnd);
+            open.pop_back();
+          }
+          break;
+        }
+      }
+    }
+    void walk() {
+      State state;
+      auto &[statement, member, frames, macroCBuffer] = state;
+      std::vector<Conditional> open;
+      size_t next = 0;
       for (size_t k = 0; k < tokens_.size(); ++k) {
+        enterBranches(k, next, state, open);
         const T &token = tokens_[k];
         int depth = static_cast<int>(frames.size());
         if (depth == 0 && token.kind == TK::Ident && token.text == "CBUFFER_START" && k + 3 < tokens_.size() &&
@@ -357,6 +401,9 @@ namespace {
     // `begin` is where the declaration starts, and `end` where it ends if a comment after it on the same line should
     // count too.
     void addDecl(DeclKind kind, const T &name, std::string detail, std::string container, size_t begin, size_t end = std::string_view::npos) {
+      // A statement an #else picks up again can finish a second time.
+      if (!declared_.insert(name.span.begin).second)
+        return;
       HlslDecl decl;
       decl.kind = kind;
       decl.name = std::string(name.text);
@@ -445,6 +492,14 @@ namespace {
     std::string_view src_;
     Span range_;
     std::vector<T> tokens_;
+    struct Branch {
+      size_t token; // the token the directive comes before
+      enum Kind { If,
+        Else,
+        Endif } kind;
+    };
+    std::vector<Branch> branches_;
+    std::set<size_t> declared_; // where the names declared so far begin
     HlslScan out_;
   };
 } // namespace
