@@ -3,7 +3,9 @@
 #include <cctype>
 #include <deque>
 #include <set>
+#include <tuple>
 #include <unordered_map>
+#include "analysis/conditionals.h"
 #include "common/util.h"
 #include "hlsl/builtins.h"
 #include "hlsl/lexer.h"
@@ -113,34 +115,51 @@ namespace {
     }
     return 6;
   }
-  const HlslDecl *bestDecl(const std::vector<const HlslDecl *> &candidates) {
+  // The #if conditions around a use in `unit`, which pick among the declarations of a name in different branches.
+  std::vector<Guard> guardsAround(const Analysis &a, size_t unit, size_t offset) {
+    return guardsAt(a.text, a.units[unit].range, offset);
+  }
+  // A declaration a use can see: one whose #if the use's own conditions don't rule out, the fewer they leave
+  // unsettled the better; then one in code the variant compiles before one an #if leaves out; then by kind.
+  using DeclRank = std::tuple<bool, int, bool, int>;
+  DeclRank declRank(const HlslDecl &decl, std::string_view text, Span range, const std::vector<Guard> &use) {
+    GuardFit fit = guardFit(guardsAt(text, range, decl.nameSpan.begin), use);
+    return {fit.excluded, fit.unsettled, !decl.active, declPriority(decl.kind)};
+  }
+  const HlslDecl *bestDecl(const Analysis &a, size_t unit, const std::vector<const HlslDecl *> &candidates, const std::vector<Guard> &use) {
     const HlslDecl *best = nullptr;
-    // One in code the variant compiles before one an #if leaves out, then by kind.
-    auto rank = [](const HlslDecl *decl) { return std::pair(!decl->active, declPriority(decl->kind)); };
+    DeclRank bestRank;
     for (const HlslDecl *decl : candidates) {
-      if (!best || rank(decl) < rank(best))
-        best = decl;
+      DeclRank rank = declRank(*decl, a.text, a.units[unit].range, use);
+      if (!best || rank < bestRank)
+        best = decl, bestRank = rank;
     }
     return best;
   }
-  const HlslDecl *findLocalDecl(const Analysis &a, const std::vector<size_t> &units, std::string_view name) {
-    std::vector<const HlslDecl *> candidates;
+  const HlslDecl *findLocalDecl(const Analysis &a, const std::vector<size_t> &units, std::string_view name, const std::vector<Guard> &use) {
+    const HlslDecl *best = nullptr;
+    DeclRank bestRank;
     for (size_t unit : units) {
       for (const HlslDecl &decl : a.units[unit].scan.decls) {
-        if (decl.name == name)
-          candidates.push_back(&decl);
+        if (decl.name != name)
+          continue;
+        DeclRank rank = declRank(decl, a.text, a.units[unit].range, use);
+        if (!best || rank < bestRank)
+          best = &decl, bestRank = rank;
       }
     }
-    return bestDecl(candidates);
+    return best;
   }
-  std::optional<ExternalDecl> findExternalDecl(const std::vector<std::shared_ptr<const CachedFile>> &files, std::string_view name) {
+  std::optional<ExternalDecl> findExternalDecl(const std::vector<std::shared_ptr<const CachedFile>> &files, std::string_view name, const std::vector<Guard> &use = {}) {
     std::optional<ExternalDecl> best;
+    DeclRank bestRank;
     for (const auto &file : files) {
       for (const HlslDecl &decl : file->scan.decls) {
         if (decl.name != name || decl.kind == DeclKind::Field)
           continue;
-        if (!best || declPriority(decl.kind) < declPriority(best->decl->kind))
-          best = ExternalDecl{file, &decl};
+        DeclRank rank = declRank(decl, file->text, {0, file->text.size()}, use);
+        if (!best || rank < bestRank)
+          best = ExternalDecl{file, &decl}, bestRank = rank;
       }
     }
     return best;
@@ -1078,7 +1097,8 @@ namespace {
       if (auto field = memberDecl(a, unit, word, context))
         return hoverResult(a, word, declMarkdown(*field->decl, field->where()), context);
     }
-    const HlslDecl *decl = findLocalDecl(a, units, name);
+    std::vector<Guard> use = guardsAround(a, unit, word.begin);
+    const HlslDecl *decl = findLocalDecl(a, units, name, use);
     if (before == '[' && !decl) {
       if (const ref::Entry *entry = hlsl::findAttribute(name))
         return hoverResult(a, word, entryMarkdown(*entry, "hlsl"), context);
@@ -1100,7 +1120,7 @@ namespace {
       return hoverResult(a, word, entryMarkdown(*keyword, "hlsl"), context);
     if (auto type = hlsl::describeType(name))
       return hoverResult(a, word, typeMarkdown(*type), context);
-    if (auto external = findExternalDecl(includedFiles(a, units, context), name)) {
+    if (auto external = findExternalDecl(includedFiles(a, units, context), name, use)) {
       return hoverResult(a, word, declMarkdown(*external->decl, displayPath(external->file->path)), context);
     }
     return nullptr;
@@ -1417,13 +1437,14 @@ namespace {
     size_t declUnit = *unit;
     std::vector<size_t> visible = a.visibleUnits(*unit);
     std::stable_partition(visible.begin(), visible.end(), [&](size_t v) { return v == *unit; });
+    std::vector<Guard> use = guardsAround(a, *unit, hit->span.begin);
     for (size_t v : visible) {
       std::vector<const HlslDecl *> candidates;
       for (const HlslDecl &candidate : a.units[v].scan.decls) {
         if (candidate.name == name)
           candidates.push_back(&candidate);
       }
-      if (const HlslDecl *best = bestDecl(candidates)) {
+      if (const HlslDecl *best = bestDecl(a, v, candidates, use)) {
         decl = best;
         declUnit = v;
         break;
@@ -1453,7 +1474,7 @@ namespace {
       uses.units = unitsSeeing(a, declUnit);
       if (a.kind == DocumentKind::HlslInclude)
         uses.declFile = a.path;
-    } else if (auto external = findExternalDecl(includedFiles(a, visible, context), name)) {
+    } else if (auto external = findExternalDecl(includedFiles(a, visible, context), name, use)) {
       uses.kind = SymbolUses::Kind::External;
       for (size_t v = 0; v < a.units.size(); ++v) {
         if (!a.isGlsl(v))
@@ -1625,7 +1646,8 @@ json definition(const Analysis &a, size_t offset, const FeatureContext &context)
         return local(field->decl->nameSpan);
       return location(field->file->path, field->file->text, field->file->lines, field->decl->nameSpan, context.encoding);
     }
-    if (const HlslDecl *decl = findLocalDecl(a, units, name))
+    std::vector<Guard> use = guardsAround(a, *unit, word.begin);
+    if (const HlslDecl *decl = findLocalDecl(a, units, name, use))
       return local(decl->nameSpan);
     if (a.kind == DocumentKind::ShaderLab) {
       if (const MaterialProperty *property = a.shader.findProperty(name))
@@ -1633,7 +1655,7 @@ json definition(const Analysis &a, size_t offset, const FeatureContext &context)
     }
     if (hlsl::isKeywordOrType(name))
       return nullptr;
-    if (auto external = findExternalDecl(includedFiles(a, units, context), name)) {
+    if (auto external = findExternalDecl(includedFiles(a, units, context), name, use)) {
       const CachedFile &file = *external->file;
       return location(file.path, file.text, file.lines, external->decl->nameSpan, context.encoding);
     }
