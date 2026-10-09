@@ -25,4 +25,19 @@ struct MacroState {
 // #define and #undef of the code it compiles, and returns the code a false condition leaves out: from the line after
 // the directive that turns it off to the start of the one that turns it back on.
 std::vector<Span> inactiveRegions(std::string_view text, Span range, MacroState &state);
+// A condition code is compiled under: `condition` is a #if expression (#ifdef X is "defined(X)"), and `holds` whether
+// it is true there or false, as the conditions of the branches before an #else are.
+struct Guard {
+  std::string condition;
+  bool holds = true;
+};
+// The conditions of the #if blocks around `offset` in text[range], outermost first. An include guard is left out.
+std::vector<Guard> guardsAt(std::string_view text, Span range, size_t offset);
+// How code under `guards` fares wherever code under `assumed` is compiled: ruled out by it, or else how many of its
+// conditions it leaves unsettled - none when it is compiled there for certain.
+struct GuardFit {
+  bool excluded = false;
+  int unsettled = 0;
+};
+GuardFit guardFit(const std::vector<Guard> &guards, const std::vector<Guard> &assumed);
 } // namespace sls

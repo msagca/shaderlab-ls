@@ -289,6 +289,31 @@ def main():
     check(kernel_members("s.") == {"a"}, "a field an #if leaves out of the variant is not offered")
     check("y" in kernel_members("v.") and "z" not in kernel_members("v."), "of two declarations, the one the variant compiles is used")
 
+    # Declarations in #if branches the variant leaves out: a use goes to the one its own #if guarantees.
+    guarded_kernel = "\n".join([
+        "#pragma kernel K",
+        "#pragma multi_compile _ _A _B",
+        "#ifdef _A",
+        "float Pick() { return 1; }",
+        "#endif",
+        "#if defined(_B)",
+        "float Pick() { return 2; }",
+        "#endif",
+        "[numthreads(1, 1, 1)] void K() {",
+        "#ifdef _B",
+        "    Pick();",
+        "#elif defined(_A)",
+        "    Pick();",
+        "#endif",
+        "}",
+    ])
+    guarded_uri = uri_for(FIXTURES / "unsaved_guarded_kernel.compute")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": guarded_uri, "languageId": "hlsl", "version": 1, "text": guarded_kernel}})
+    for line, expected, branch in [(10, 6, "#ifdef _B"), (12, 3, "#elif after it")]:
+        target = client.request("textDocument/definition", {"textDocument": {"uri": guarded_uri}, "position": {"line": line, "character": 5}})
+        check(target is not None and target["range"]["start"]["line"] == expected, f"a call under {branch} goes to the definition that branch compiles")
+    client.notify("textDocument/didClose", {"textDocument": {"uri": guarded_uri}})
+
 
     print("unity_compat.shader")
     compat_uri = open_doc(client, FIXTURES / "unity_compat.shader")

@@ -1,4 +1,5 @@
 #include "analysis/conditionals.h"
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include "common/util.h"
@@ -278,6 +279,100 @@ namespace {
     }
     return std::string(trim(rest));
   }
+  // A directive's name and the rest of it: "ifdef" and "_FANCY".
+  std::pair<std::string_view, std::string> splitDirective(std::string_view text, const HlslToken &token) {
+    std::string_view directive = text.substr(token.span.begin + 1, token.span.end - token.span.begin - 1);
+    size_t i = 0;
+    while (i < directive.size() && (directive[i] == ' ' || directive[i] == '\t'))
+      ++i;
+    size_t nameBegin = i;
+    while (i < directive.size() && isIdentChar(directive[i]))
+      ++i;
+    return {directive.substr(nameBegin, i - nameBegin), directiveRest(directive.substr(i))};
+  }
+  std::string leadingName(std::string_view text) {
+    size_t end = 0;
+    while (end < text.size() && isIdentChar(text[end]))
+      ++end;
+    return std::string(text.substr(0, end));
+  }
+  std::string withoutSpaces(std::string_view text) {
+    std::string result;
+    for (char c : text) {
+      if (!std::isspace(static_cast<unsigned char>(c)))
+        result.push_back(c);
+    }
+    return result;
+  }
+  // Whether text[begin, end) is wrapped in one pair of parentheses: "(a && b)" is, "(a) && (b)" is not.
+  bool parenthesized(std::string_view text) {
+    if (text.size() < 2 || text.front() != '(' || text.back() != ')')
+      return false;
+    int depth = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+      depth += text[i] == '(' ? 1 : text[i] == ')' ? -1
+                                                   : 0;
+      if (depth == 0 && i + 1 < text.size())
+        return false;
+    }
+    return true;
+  }
+  // What a guard tells of the names it tests, for the ones it settles alone: "defined(_A) && !defined(_B)" holding
+  // has _A defined and _B not, and "defined(_A) || X" failing has _A not defined. A name it needs to be non-zero is
+  // known to be defined, though not its value.
+  void learn(const Guard &guard, MacroState &state) {
+    std::string text = withoutSpaces(guard.condition);
+    while (parenthesized(text))
+      text = text.substr(1, text.size() - 2);
+    // Holding, it is the parts of an && that each hold; failing, the parts of an || that each fail.
+    std::string_view joiner = guard.holds ? "&&" : "||";
+    std::string_view other = guard.holds ? "||" : "&&";
+    std::vector<std::string> parts;
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i < text.size(); ++i) {
+      depth += text[i] == '(' ? 1 : text[i] == ')' ? -1
+                                                   : 0;
+      if (depth != 0)
+        continue;
+      if (text.compare(i, 2, other) == 0)
+        return; // not settled by any one name
+      if (text.compare(i, 2, joiner) == 0) {
+        parts.push_back(text.substr(start, i - start));
+        start = i + 2;
+        ++i;
+      }
+    }
+    parts.push_back(text.substr(start));
+    for (std::string part : parts) {
+      bool holds = guard.holds;
+      while (true) {
+        if (parenthesized(part))
+          part = part.substr(1, part.size() - 2);
+        else if (!part.empty() && part[0] == '!' && part.compare(0, 2, "!=") != 0) {
+          part.erase(0, 1);
+          holds = !holds;
+        } else
+          break;
+      }
+      bool tested = part.compare(0, 7, "defined") == 0;
+      std::string name = leadingName(tested ? std::string_view(part).substr(7) : std::string_view(part));
+      if (tested && name.empty() && parenthesized(part.substr(7)))
+        name = leadingName(std::string_view(part).substr(8));
+      if (name.empty() || std::isdigit(static_cast<unsigned char>(name[0])) || name == "defined")
+        continue;
+      size_t length = tested ? (part.size() > 7 && part[7] == '(' ? name.size() + 9 : name.size() + 7) : name.size();
+      if (part.size() != length)
+        continue; // compares or computes with it
+      if (holds) {
+        state.undefined.erase(name);
+        state.defined.try_emplace(name, std::nullopt);
+      } else if (tested) {
+        state.defined.erase(name);
+        state.undefined.insert(name);
+      }
+    }
+  }
   struct Frame {
     bool parentLive;
     bool parentCertain;
@@ -304,15 +399,7 @@ std::vector<Span> inactiveRegions(std::string_view text, Span range, MacroState 
   for (const HlslToken &token : lexHlsl(text, range)) {
     if (token.kind != HlslTok::Directive)
       continue;
-    std::string_view directive = text.substr(token.span.begin + 1, token.span.end - token.span.begin - 1);
-    size_t i = 0;
-    while (i < directive.size() && (directive[i] == ' ' || directive[i] == '\t'))
-      ++i;
-    size_t nameBegin = i;
-    while (i < directive.size() && isIdentChar(directive[i]))
-      ++i;
-    std::string_view name = directive.substr(nameBegin, i - nameBegin);
-    std::string rest = directiveRest(directive.substr(i));
+    auto [name, rest] = splitDirective(text, token);
     bool wasLive = live();
     if (name == "if" || name == "ifdef" || name == "ifndef") {
       Tri condition = Tri::Maybe;
@@ -371,5 +458,69 @@ std::vector<Span> inactiveRegions(std::string_view text, Span range, MacroState 
   if (!live() && range.end > inactiveSince)
     regions.push_back({inactiveSince, range.end});
   return regions;
+}
+std::vector<Guard> guardsAt(std::string_view text, Span range, size_t offset) {
+  struct Block {
+    std::vector<Guard> earlier; // a guard for each branch so far, holding where that branch is compiled
+    std::vector<Guard> branch; // the guards of the branch `offset` would be in
+    size_t opened; // the directive that opened it, counted from the start
+    bool includeGuard = false; // #ifndef X followed by #define X
+  };
+  std::vector<Block> blocks;
+  size_t count = 0;
+  for (const HlslToken &token : lexHlsl(text, range)) {
+    if (token.span.begin >= offset)
+      break;
+    if (token.kind != HlslTok::Directive)
+      continue;
+    auto [name, rest] = splitDirective(text, token);
+    ++count;
+    if (name == "if" || name == "ifdef" || name == "ifndef") {
+      Guard guard = name == "if" ? Guard{rest, true} : Guard{"defined(" + leadingName(rest) + ")", name == "ifdef"};
+      blocks.push_back({{guard}, {guard}, count});
+    } else if ((name == "elif" || name == "else") && !blocks.empty()) {
+      Block &block = blocks.back();
+      block.branch.clear();
+      for (const Guard &earlier : block.earlier)
+        block.branch.push_back({earlier.condition, !earlier.holds});
+      if (name == "elif") {
+        block.branch.push_back({rest, true});
+        block.earlier.push_back({rest, true});
+      }
+    } else if (name == "endif" && !blocks.empty()) {
+      blocks.pop_back();
+    } else if (name == "define" && !blocks.empty()) {
+      Block &block = blocks.back();
+      const Guard &opener = block.earlier.front();
+      if (block.opened + 1 == count && block.earlier.size() == 1 && !opener.holds && opener.condition == "defined(" + leadingName(rest) + ")")
+        block.includeGuard = true;
+    }
+  }
+  std::vector<Guard> guards;
+  for (const Block &block : blocks) {
+    if (!block.includeGuard)
+      guards.insert(guards.end(), block.branch.begin(), block.branch.end());
+  }
+  return guards;
+}
+GuardFit guardFit(const std::vector<Guard> &guards, const std::vector<Guard> &assumed) {
+  MacroState state;
+  state.closed = false; // what the assumed guards don't tell is not known
+  for (const Guard &guard : assumed)
+    learn(guard, state);
+  GuardFit fit;
+  for (const Guard &guard : guards) {
+    bool same = std::any_of(assumed.begin(), assumed.end(), [&](const Guard &other) {
+      return other.holds == guard.holds && withoutSpaces(other.condition) == withoutSpaces(guard.condition);
+    });
+    if (same)
+      continue;
+    Tri value = truth(Expression(guard.condition, state).evaluate());
+    if (value == Tri::Maybe)
+      ++fit.unsettled;
+    else if ((value == Tri::Yes) != guard.holds)
+      fit.excluded = true;
+  }
+  return fit;
 }
 } // namespace sls
