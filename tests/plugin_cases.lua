@@ -28,11 +28,20 @@ vim.g.shaderlab_ls_download = false
 -- Nor do the throwaway projects belong in the user's cache folder.
 vim.lsp.config('shaderlab_ls', { init_options = { indexCache = false } })
 
+-- The clients that have attached, as the log records them. A client exists before it attaches: it attaches once its
+-- server has answered initialize, so a case waiting on vim.lsp.get_clients() could quit before the log says so.
+local attachments, detachments = {}, {}
 vim.api.nvim_create_autocmd('LspAttach', {
-  callback = function(event) log(('attach buf=%d client=%d'):format(event.buf, event.data.client_id)) end,
+  callback = function(event)
+    attachments[#attachments + 1] = event.data.client_id
+    log(('attach buf=%d client=%d'):format(event.buf, event.data.client_id))
+  end,
 })
 vim.api.nvim_create_autocmd('LspDetach', {
-  callback = function(event) log(('detach buf=%d client=%d'):format(event.buf, event.data.client_id)) end,
+  callback = function(event)
+    detachments[#detachments + 1] = event.data.client_id
+    log(('detach buf=%d client=%d'):format(event.buf, event.data.client_id))
+  end,
 })
 
 local notified = {}
@@ -98,8 +107,10 @@ local function until_(predicate, deadline)
   end)
 end
 
+-- One client serving the buffer: a restart's old client gone, and the one left attached.
 local function attached()
-  return #clients() > 0
+  local all = clients()
+  return #all == 1 and vim.list_contains(attachments, all[1].id)
 end
 
 local cases = {}
@@ -129,11 +140,15 @@ cases.install_with_shader = function()
 end
 
 -- A stale executable serves the buffer while its replacement is built, and the buffer is moved onto the
--- replacement when it lands: a second client for the same buffer, and the first one detached.
+-- replacement when it lands: a second client for the same buffer, and the first one detached. The old client shuts
+-- down while the new one initializes, so either can finish first; the case waits for both, and for the old one to go.
 cases.stale = function()
   vim.lsp.enable 'shaderlab_ls'
   open()
-  until_(function() return said 'shaderlab%-ls built' and #clients() > 0 and clients()[1].id > 1 end)
+  until_(function()
+    return said 'shaderlab%-ls built' and vim.list_contains(detachments, 1) and #clients() == 1
+      and vim.iter(attachments):any(function(id) return id > 1 end)
+  end)
 end
 
 -- An executable newer than the sources is what this checkout should be serving: no build, and a client on it.
