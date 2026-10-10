@@ -368,6 +368,26 @@ def main():
     check(names.count("Pre") == 2 and "After" in names and "K" in names, "and each branch's header is a symbol, once: " + str(names))
     client.notify("textDocument/didClose", {"textDocument": {"uri": split_uri}})
 
+    # A macro invoked without a semicolon, as Unity's surface shader template does: the function after it is still found.
+    macro_kernel = "\n".join([
+        "#pragma kernel K",
+        "UNITY_INSTANCING_BUFFER_START(Props)",
+        "UNITY_INSTANCING_BUFFER_END(Props)",
+        "float Tint(float c) { return c; }",
+        "UNITY_DECLARE_TEX2D(_Tex)",
+        "[numthreads(1, 1, 1)] void K() { Tint(1); }",
+    ])
+    macro_uri = uri_for(FIXTURES / "unsaved_macro_kernel.compute")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": macro_uri, "languageId": "hlsl", "version": 1, "text": macro_kernel}})
+    where_tint = {"textDocument": {"uri": macro_uri}, "position": {"line": 5, "character": 35}}
+    target = client.request("textDocument/definition", where_tint)
+    check(target is not None and target["range"]["start"]["line"] == 3, "a function after a macro invoked without a semicolon is found")
+    hover = client.request("textDocument/hover", where_tint)
+    check(hover is not None and "float Tint(float c)" in hover["contents"]["value"], "and its hover shows the function, not the macro")
+    outline = [s["name"] for s in client.request("textDocument/documentSymbol", {"textDocument": {"uri": macro_uri}})]
+    check("Tint" in outline and "K" in outline, "and both functions are symbols: " + str(outline))
+    client.notify("textDocument/didClose", {"textDocument": {"uri": macro_uri}})
+
     # An include guard written as #if !defined(X) is no condition on what it guards, as with #ifndef X.
     with tempfile.TemporaryDirectory() as temp:
         folder = pathlib.Path(temp)
@@ -697,12 +717,12 @@ def main():
     legacy_uri = uri_for(FIXTURES / "unsaved_legacy.shader")
     client.notify("textDocument/didOpen", {"textDocument": {"uri": legacy_uri, "languageId": "shaderlab", "version": 1, "text": shaderlab_source}})
     legacy_lines = shaderlab_source.split("\n")
-    for needle, skip, expected, description in [
+    for needle, offset, expected, description in [
         ('"bump"', 1, "flat normal map", "a built-in texture default"),
         ("Lighting", 0, "per-vertex lighting", "a legacy command"),
         ("Mode", 0, "fog mode", "a command inside a legacy block"),
     ]:
-        check(expected in hover_text(legacy_uri, legacy_lines, needle, skip), f"hover describes {description}")
+        check(expected in hover_text(legacy_uri, legacy_lines, needle, offset), f"hover describes {description}")
 
     definition = client.request("textDocument/definition", {"textDocument": {"uri": valid_uri}, "position": {"line": 22, "character": 16}})
     check(definition is not None and definition["range"]["start"]["line"] == 8, "definition of [_Cull] goes to the property")
@@ -1002,8 +1022,8 @@ def main():
         ("// _Color", None, "comment", set(), "a comment"),
         ("0", "Shared(2)", "number", set(), "a number"),
     ]:
-        needle, line_has, kind, modifiers, description, *skip = case
-        length, kind_found, modifiers_found = token(needle, skip[0] if skip else 0, line_has)
+        needle, line_has, kind, modifiers, description, *skip_lines = case
+        length, kind_found, modifiers_found = token(needle, skip_lines[0] if skip_lines else 0, line_has)
         check(kind_found == kind and modifiers <= modifiers_found, f"semantic token for {description}"
               + ("" if kind_found == kind else f": {kind_found}"))
     quiet = Client(exe)
