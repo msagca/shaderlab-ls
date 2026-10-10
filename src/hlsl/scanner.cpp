@@ -265,6 +265,9 @@ namespace {
             frame = classifyBlock(statement, token, name);
             if (frame != Frame::Initializer)
               statement.clear();
+          } else if (depth == 1 && frames.back().first == Frame::Struct &&
+                     addMethod(member, token.span.begin, frames.back().second)) {
+            frame = Frame::Function;
           }
           frames.emplace_back(frame, name);
           member.clear();
@@ -296,13 +299,43 @@ namespace {
         if (depth == 1 && (frames.back().first == Frame::Struct || frames.back().first == Frame::CBuffer)) {
           if (isPunct(token, ';')) {
             DeclKind kind = frames.back().first == Frame::Struct ? DeclKind::Field : DeclKind::Variable;
-            addVariables(member, kind, frames.back().second);
+            // A method declared here and defined outside, float Get();, is no field.
+            if (kind == DeclKind::Variable || member.empty() || !addMethod(member, member.back()->span.end, frames.back().second))
+              addVariables(member, kind, frames.back().second);
             member.clear();
           } else {
             member.push_back(&token);
           }
         }
       }
+    }
+    // A method of `structName`, if `member` is the header of one: its name is the identifier before the first '(',
+    // with a type before that, and no '=' or ':' before it, as a field's initializer or semantic has. `end` is where
+    // the header ends. Attributes in brackets before it are skipped.
+    bool addMethod(const std::vector<const T *> &member, size_t end, const std::string &structName) {
+      int bracket = 0;
+      size_t start = member.size();
+      for (size_t i = 0; i < member.size(); ++i) {
+        const T &token = *member[i];
+        if (isPunct(token, '['))
+          ++bracket;
+        if (isPunct(token, ']'))
+          --bracket;
+        if (bracket != 0 || isPunct(token, ']'))
+          continue;
+        if (start == member.size())
+          start = i;
+        if (isPunct(token, '=') || isPunct(token, ':'))
+          return false;
+        if (isPunct(token, '(')) {
+          if (i < start + 2 || member[i - 1]->kind != TK::Ident)
+            return false;
+          std::string detail = collapse(src_.substr(member[start]->span.begin, end - member[start]->span.begin));
+          addDecl(DeclKind::Function, *member[i - 1], detail, structName, member[start]->span.begin);
+          return true;
+        }
+      }
+      return false;
     }
     // NAME(...) and nothing more: no declaration goes on after that with another identifier.
     static bool isMacroCall(const std::vector<const T *> &statement) {

@@ -555,8 +555,8 @@ namespace {
           return std::nullopt;
         return TypeRef{size == 1 ? shape->scalar : shape->scalar + std::to_string(size), {}};
       }
-      if (auto field = find(segment.name, {DeclKind::Field}, type.name))
-        return typeInDetail(field->decl->detail, segment.name);
+      if (auto member = find(segment.name, {DeclKind::Field, DeclKind::Function}, type.name))
+        return typeInDetail(member->decl->detail, segment.name);
       return std::nullopt;
     }
   private:
@@ -648,7 +648,7 @@ namespace {
       --begin;
     return begin > floor && text[begin - 1] == '.' ? std::optional(begin - 1) : std::nullopt;
   }
-  // The field a member access names, `uv` in `input.uv`, found through the type of what is before the '.'.
+  // The field or method a member access names, `uv` in `input.uv`, found through the type of what is before the '.'.
   std::optional<FoundDecl> memberDecl(const Analysis &a, size_t unit, Span word, const FeatureContext &context) {
     auto dot = dotBefore(a.text, word.begin, a.units[unit].range.begin);
     if (!dot)
@@ -657,7 +657,7 @@ namespace {
     auto type = resolver.typeBefore(*dot);
     if (!type)
       return std::nullopt;
-    return resolver.find(a.text.substr(word.begin, word.end - word.begin), {DeclKind::Field}, type->name);
+    return resolver.find(a.text.substr(word.begin, word.end - word.begin), {DeclKind::Field, DeclKind::Function}, type->name);
   }
   json hlslCompletion(const Analysis &a, size_t unit, size_t offset, const FeatureContext &context) {
     Items items(context);
