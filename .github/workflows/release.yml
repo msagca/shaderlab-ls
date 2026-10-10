@@ -3,7 +3,8 @@ name: release
 # Tagging is what publishes: push v<major>.<minor>.<patch> and the binaries for it appear on the release of the same
 # name. The tag has to agree with the version in CMakeLists.txt, which stays the one place the version is written.
 # Publishing a release with a new tag on github.com pushes that tag too, and its release gets the binaries the same way.
-# workflow_dispatch builds, packages and tests the same way but publishes nothing, for trying the packaging out.
+# workflow_dispatch builds, packages and tests the same way; run on a branch it publishes nothing, for trying the
+# packaging out, and run on a tag it publishes that tag's release, which is how tag.yml starts it.
 on:
   push:
     tags: ['v*']

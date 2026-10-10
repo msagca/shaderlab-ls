@@ -1,0 +1,37 @@
+name: tag
+
+# Tags the commit it is run on with the version in CMakeLists.txt and starts release.yml on that tag, for releasing
+# where pushing a tag is not possible, such as from GitHub's mobile app: Actions > tag > Run workflow, on main.
+# A tag pushed with the workflow's own token starts no workflow by itself, so release.yml is started explicitly.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the tag
+  actions: write # start release.yml
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # As release.yml reads it: the project() line, not cmake_minimum_required.
+          version=$(grep -F 'project(' CMakeLists.txt | grep -oE 'VERSION [0-9]+[.][0-9]+[.][0-9]+' | head -1 | cut -d' ' -f2)
+          if [ -z "$version" ]; then
+            echo "No project version found in CMakeLists.txt" >&2
+            exit 1
+          fi
+          tag="v${version}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" > /dev/null; then
+            echo "${tag} already exists: bump project(... VERSION ...) in CMakeLists.txt first" >&2
+            exit 1
+          fi
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/${tag}"
+          gh workflow run release.yml --ref "$tag"
+          echo "Tagged ${GITHUB_SHA} as ${tag} and started release.yml on it" >> "$GITHUB_STEP_SUMMARY"
