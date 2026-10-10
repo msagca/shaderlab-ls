@@ -285,6 +285,10 @@ namespace {
             finishVariable(statement, macroCBuffer);
             statement.clear();
           } else {
+            // A macro invocation that brings its own semicolon, or needs none, such as
+            // UNITY_INSTANCING_BUFFER_END(Props): what follows it is a declaration of its own.
+            if ((token.kind == TK::Ident || isPunct(token, '[')) && isMacroCall(statement))
+              statement.clear();
             statement.push_back(&token);
           }
           continue;
@@ -299,6 +303,19 @@ namespace {
           }
         }
       }
+    }
+    // NAME(...) and nothing more: no declaration goes on after that with another identifier.
+    static bool isMacroCall(const std::vector<const T *> &statement) {
+      if (statement.size() < 3 || statement[0]->kind != TK::Ident || !isPunct(*statement[1], '('))
+        return false;
+      int nesting = 0;
+      for (size_t i = 1; i < statement.size(); ++i) {
+        if (isPunct(*statement[i], '('))
+          ++nesting;
+        if (isPunct(*statement[i], ')') && --nesting == 0)
+          return i + 1 == statement.size();
+      }
+      return false;
     }
     Frame classifyBlock(const std::vector<const T *> &statement, const T &brace, std::string &name) {
       if (statement.empty())
