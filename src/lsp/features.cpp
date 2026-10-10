@@ -659,6 +659,54 @@ namespace {
       return std::nullopt;
     return resolver.find(a.text.substr(word.begin, word.end - word.begin), {DeclKind::Field, DeclKind::Function}, type->name);
   }
+  // Where the parameter or local `word` names is declared, by block scope, if it names one.
+  std::optional<size_t> localDecl(const Analysis &a, size_t unit, Span word) {
+    std::unordered_map<size_t, size_t> bindings = localBindings(a.text, a.units[unit].range);
+    auto it = bindings.find(word.begin);
+    return it == bindings.end() ? std::nullopt : std::optional(it->second);
+  }
+  // A parameter or local as it is declared, `out float3 normal` or `int i`: from the '(', ',' or start of the
+  // statement before its name up to the name. A ',' inside <> such as vector<float, 3>'s is part of the type.
+  std::string localMarkdown(const Analysis &a, size_t unit, size_t declaration) {
+    size_t floor = a.units[unit].range.begin;
+    size_t begin = declaration;
+    int angle = 0;
+    for (; begin > floor; --begin) {
+      char c = a.text[begin - 1];
+      if (c == '>')
+        ++angle;
+      else if (c == '<')
+        --angle;
+      else if (angle <= 0 && (c == '(' || c == ',' || c == ';' || c == '{' || c == '}'))
+        break;
+    }
+    size_t end = wordAt(a.text, declaration).end;
+    // A name a parameter macro declares, tex in TEXTURE2D_PARAM(tex, samp): the macro is its declaration.
+    bool bare = trim(std::string_view(a.text).substr(begin, end - begin)) == std::string_view(a.text).substr(declaration, end - declaration);
+    if (bare && begin > floor && (a.text[begin - 1] == '(' || a.text[begin - 1] == ',')) {
+      size_t open = begin - 1;
+      while (open > floor && a.text[open] != '(' && a.text[open] != ')' && a.text[open] != ';' && a.text[open] != '{' && a.text[open] != '}')
+        --open;
+      Span macro = wordAt(a.text, open);
+      size_t close = a.text.find(')', end);
+      if (a.text[open] == '(' && !macro.empty() && close != std::string::npos &&
+          std::none_of(a.text.begin() + macro.begin, a.text.begin() + macro.end, [](char c) { return std::islower(static_cast<unsigned char>(c)); }))
+        begin = macro.begin, end = close + 1;
+    }
+    std::string text;
+    bool space = false;
+    for (char c : a.text.substr(begin, end - begin)) {
+      if (std::isspace(static_cast<unsigned char>(c))) {
+        space = !text.empty();
+        continue;
+      }
+      if (space)
+        text.push_back(' ');
+      space = false;
+      text.push_back(c);
+    }
+    return "```hlsl\n" + text + "\n```";
+  }
   json hlslCompletion(const Analysis &a, size_t unit, size_t offset, const FeatureContext &context) {
     Items items(context);
     std::vector<size_t> units = a.visibleUnits(unit);
@@ -1097,6 +1145,10 @@ namespace {
     if (before == '.') {
       if (auto field = memberDecl(a, unit, word, context))
         return hoverResult(a, word, declMarkdown(*field->decl, field->where()), context);
+    }
+    if (before != '.') {
+      if (auto declaration = localDecl(a, unit, word))
+        return hoverResult(a, word, localMarkdown(a, unit, *declaration), context);
     }
     std::vector<Guard> use = guardsAround(a, unit, word.begin);
     const HlslDecl *decl = findLocalDecl(a, units, name, use);
@@ -1647,6 +1699,8 @@ json definition(const Analysis &a, size_t offset, const FeatureContext &context)
         return local(field->decl->nameSpan);
       return location(field->file->path, field->file->text, field->file->lines, field->decl->nameSpan, context.encoding);
     }
+    if (auto declaration = localDecl(a, *unit, word))
+      return local(wordAt(a.text, *declaration));
     std::vector<Guard> use = guardsAround(a, *unit, word.begin);
     if (const HlslDecl *decl = findLocalDecl(a, units, name, use))
       return local(decl->nameSpan);

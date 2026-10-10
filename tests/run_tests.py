@@ -418,6 +418,44 @@ def main():
           "and its hover shows the method and its struct")
     client.notify("textDocument/didClose", {"textDocument": {"uri": method_uri}})
 
+    # Declarations of many shapes: in each case « marks the name declared and » a use of it, which goes to it and
+    # has a hover.
+    for description, marked in [
+        ("a parameter", "float F(float «radius) { return »radius * 2; }"),
+        ("a local", "float F() { float «local = 1; return »local; }"),
+        ("a local that shadows a global", "float x;\nfloat F() { float «x = 1; return »x; }"),
+        ("a parameter that shadows a global", "float x;\nfloat F(float «x) { return »x; }"),
+        ("a for variable", "float F() { float s = 0; for (int «i = 0; i < 4; i++) s += »i; return s; }"),
+        ("an out parameter", "void F(out float «result) { »result = 1; }"),
+        ("a parameter a macro declares", "float4 F(TEXTURE2D_PARAM(«tex, samp), float2 uv) { return SAMPLE_TEXTURE2D(»tex, samp, uv); }"),
+        ("an instanced property", "UNITY_INSTANCING_BUFFER_START(Props)\n    UNITY_DEFINE_INSTANCED_PROP(float4, «_Color)\n"
+                                  "UNITY_INSTANCING_BUFFER_END(Props)\nfloat4 F() { return UNITY_ACCESS_INSTANCED_PROP(Props, »_Color); }"),
+        ("a global with a register", "Texture2D<float4> «_Tex : register(t0);\nSamplerState s;\nfloat4 F() { return »_Tex.Sample(s, 0); }"),
+        ("a method after a macro with arguments", "struct S {\n    UNITY_FOG_COORDS(1)\n    float «Get() { return 1; }\n};\nfloat F(S s) { return s.»Get(); }"),
+        ("a texture a macro declares without a semicolon", "UNITY_DECLARE_TEX2D(«_Tex)\nfloat4 F(float2 uv) { return UNITY_SAMPLE_TEX2D(»_Tex, uv); }"),
+        ("a typedef", "typedef float3 «Color;\nfloat4 F() { »Color x = 0; return x.xyzz; }"),
+        ("a typedef of a struct", "typedef struct { float a; } «Pair;\nfloat F() { »Pair p; return p.a; }"),
+        ("a field of a typedef'd struct", "typedef struct { float «a; } Pair;\nfloat F(Pair p) { return p.»a; }"),
+        ("a variable declared with its struct", "struct S { float a; } «gS;\nfloat F() { return »gS.a; }"),
+        ("a declaration after an #if 0 with an unbalanced brace", "#if 0\nvoid Old() {\n#endif\nfloat «G() { return 1; }\nfloat F() { return »G(); }"),
+        ("a declaration in an #if 0's #else", "#if 0\nvoid Old() {\n#else\nfloat «G() { return 1; }\n#endif\nfloat F() { return »G(); }"),
+    ]:
+        declared = marked.index("«")
+        text = marked.replace("«", "", 1)
+        used = text.index("»")
+        text = text.replace("»", "", 1)
+        declared -= 1 if declared > used else 0
+        def position(offset):
+            return {"line": text.count("\n", 0, offset), "character": offset - (text.rfind("\n", 0, offset) + 1)}
+        shape_uri = uri_for(FIXTURES / "unsaved_shape.hlsl")
+        client.notify("textDocument/didOpen", {"textDocument": {"uri": shape_uri, "languageId": "hlsl", "version": 1, "text": text}})
+        where = {"textDocument": {"uri": shape_uri}, "position": position(used + 1)}
+        target = client.request("textDocument/definition", where)
+        hover = client.request("textDocument/hover", where)
+        check(target is not None and target["range"]["start"] == position(declared) and hover is not None,
+              f"definition and hover of {description}")
+        client.notify("textDocument/didClose", {"textDocument": {"uri": shape_uri}})
+
     # An include guard written as #if !defined(X) is no condition on what it guards, as with #ifndef X.
     with tempfile.TemporaryDirectory() as temp:
         folder = pathlib.Path(temp)

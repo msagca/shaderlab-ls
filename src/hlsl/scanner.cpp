@@ -74,6 +74,12 @@ namespace {
           continue;
         }
         lineStart = false;
+        if (dead_ > 0) {
+          // In an #if 0: skip to the next line, where a directive may end it, without reading strings or comments.
+          while (i < end && src_[i] != '\n')
+            ++i;
+          continue;
+        }
         size_t begin = i;
         if (c == '"' || c == '\'') {
           ++i;
@@ -132,6 +138,23 @@ namespace {
       Span whole{hash, lineEnd};
       if (!whole.empty() && src_[whole.end - 1] == '\r')
         --whole.end;
+      if (dead_ > 0) {
+        // Inside an #if 0 only the nesting counts: an #else or #elif of the #if 0 itself starts code that may be
+        // compiled, which then goes on as an #if of its own up to the #endif.
+        if (name == "if" || name == "ifdef" || name == "ifndef") {
+          ++dead_;
+        } else if (name == "endif") {
+          --dead_;
+        } else if ((name == "else" || name == "elif") && dead_ == 1) {
+          dead_ = 0;
+          branches_.push_back({tokens_.size(), Branch::If});
+        }
+        return lineEnd;
+      }
+      if (name == "if" && isZero(src_.substr(nameSpan.end, lineEnd - nameSpan.end))) {
+        dead_ = 1;
+        return lineEnd;
+      }
       if (name == "if" || name == "ifdef" || name == "ifndef")
         branches_.push_back({tokens_.size(), Branch::If});
       else if (name == "elif" || name == "else")
@@ -194,6 +217,13 @@ namespace {
       }
       return lineEnd;
     }
+    // An #if expression that is 0, as in #if 0 // old code.
+    static bool isZero(std::string_view expression) {
+      size_t comment = expression.find("//");
+      if (comment != std::string_view::npos)
+        expression = expression.substr(0, comment);
+      return trim(expression) == "0";
+    }
     // ---- declarations --------------------------------------------------------
     enum class Frame { Other,
       Struct,
@@ -205,6 +235,15 @@ namespace {
       std::vector<const T *> member;
       std::vector<std::pair<Frame, std::string>> frames;
       std::string macroCBuffer;
+      // A struct at file scope, from its opening brace until the ';' after its closing one: the names before that
+      // ';' are variables of it, as in struct S { ... } gS;, or with typedef, names for it.
+      struct TopStruct {
+        std::string name; // empty for an anonymous one
+        bool isTypedef = false;
+        size_t firstDecl = 0; // where its fields start in the declarations
+        bool closed = false;
+      };
+      std::optional<TopStruct> topStruct;
     };
     // Each branch of an #if starts where the #if left off, so that alternatives such as two headers of one function,
     // each opening its body, don't add up; after the #endif the code goes on from where the first branch ended.
@@ -237,7 +276,7 @@ namespace {
     }
     void walk() {
       State state;
-      auto &[statement, member, frames, macroCBuffer] = state;
+      auto &[statement, member, frames, macroCBuffer, topStruct] = state;
       std::vector<Conditional> open;
       size_t next = 0;
       for (size_t k = 0; k < tokens_.size(); ++k) {
@@ -262,7 +301,12 @@ namespace {
           Frame frame = Frame::Other;
           std::string name;
           if (depth == 0) {
+            bool isTypedef = !statement.empty() && statement[0]->kind == TK::Ident && statement[0]->text == "typedef";
             frame = classifyBlock(statement, token, name);
+            if (frame == Frame::Struct)
+              topStruct = State::TopStruct{name, isTypedef, out_.decls.size()};
+            else
+              topStruct.reset(); // a struct whose ';' never came
             if (frame != Frame::Initializer)
               statement.clear();
           } else if (depth == 1 && frames.back().first == Frame::Struct &&
@@ -280,18 +324,26 @@ namespace {
           frames.pop_back();
           if (frames.empty() && frame != Frame::Initializer)
             statement.clear();
+          if (frames.empty() && frame == Frame::Struct && topStruct)
+            topStruct->closed = true;
           member.clear();
           continue;
         }
         if (depth == 0) {
           if (isPunct(token, ';')) {
-            finishVariable(statement, macroCBuffer);
+            if (topStruct && topStruct->closed)
+              finishStruct(statement, *topStruct, macroCBuffer);
+            else
+              finishVariable(statement, macroCBuffer);
+            topStruct.reset();
             statement.clear();
           } else {
             // A macro invocation that brings its own semicolon, or needs none, such as
             // UNITY_INSTANCING_BUFFER_END(Props): what follows it is a declaration of its own.
-            if ((token.kind == TK::Ident || isPunct(token, '[')) && isMacroCall(statement))
+            if ((token.kind == TK::Ident || isPunct(token, '[')) && isMacroCall(statement)) {
+              finishVariable(statement, macroCBuffer, true);
               statement.clear();
+            }
             statement.push_back(&token);
           }
           continue;
@@ -304,8 +356,40 @@ namespace {
               addVariables(member, kind, frames.back().second);
             member.clear();
           } else {
+            // As at file scope: UNITY_FOG_COORDS(1) and the like need no semicolon.
+            if ((token.kind == TK::Ident || isPunct(token, '[')) && isMacroCall(member))
+              member.clear();
             member.push_back(&token);
           }
+        }
+      }
+    }
+    // The ';' after a struct's closing brace: what is between them names variables of the struct, or with typedef,
+    // the struct itself, whose fields then belong to that name if the struct had none of its own.
+    void finishStruct(const std::vector<const T *> &statement, const State::TopStruct &top, const std::string &container) {
+      std::vector<const T *> names;
+      bool stopped = false;
+      for (const T *token : statement) {
+        if (isPunct(*token, ','))
+          stopped = false;
+        else if (isPunct(*token, '[') || isPunct(*token, ':') || isPunct(*token, '='))
+          stopped = true;
+        else if (!stopped && token->kind == TK::Ident)
+          names.push_back(token);
+      }
+      if (names.empty())
+        return;
+      if (!top.isTypedef) {
+        for (const T *name : names)
+          addDecl(DeclKind::Variable, *name, "struct " + top.name + " " + std::string(name->text), container, name->span.begin);
+        return;
+      }
+      for (const T *name : names)
+        addDecl(DeclKind::Struct, *name, "typedef struct " + std::string(name->text), "", name->span.begin);
+      if (top.name.empty()) {
+        for (size_t i = top.firstDecl; i < out_.decls.size(); ++i) {
+          if (out_.decls[i].kind == DeclKind::Field && out_.decls[i].container.empty())
+            out_.decls[i].container = std::string(names[0]->text);
         }
       }
     }
@@ -353,14 +437,17 @@ namespace {
     Frame classifyBlock(const std::vector<const T *> &statement, const T &brace, std::string &name) {
       if (statement.empty())
         return Frame::Other;
-      const T &first = *statement[0];
+      size_t head = statement[0]->kind == TK::Ident && statement[0]->text == "typedef" && statement.size() > 1 ? 1 : 0;
+      const T &first = *statement[head];
       if (first.kind == TK::Ident && (first.text == "struct" || first.text == "cbuffer" || first.text == "tbuffer") &&
-          statement.size() >= 2 && statement[1]->kind == TK::Ident) {
+          statement.size() >= head + 2 && statement[head + 1]->kind == TK::Ident) {
         bool isStruct = first.text == "struct";
-        name = std::string(statement[1]->text);
-        addDecl(isStruct ? DeclKind::Struct : DeclKind::CBuffer, *statement[1], std::string(first.text) + " " + name, "", first.span.begin);
+        name = std::string(statement[head + 1]->text);
+        addDecl(isStruct ? DeclKind::Struct : DeclKind::CBuffer, *statement[head + 1], std::string(first.text) + " " + name, "", first.span.begin);
         return isStruct ? Frame::Struct : Frame::CBuffer;
       }
+      if (first.kind == TK::Ident && first.text == "struct" && statement.size() == head + 1)
+        return Frame::Struct; // anonymous: typedef struct { ... } Name;
       int bracket = 0;
       size_t start = statement.size();
       for (size_t i = 0; i < statement.size(); ++i) {
@@ -386,25 +473,43 @@ namespace {
       }
       return Frame::Other;
     }
-    void finishVariable(const std::vector<const T *> &statement, const std::string &container) {
+    // `bare`: a macro invocation with no semicolon after it, such as UNITY_INSTANCING_BUFFER_START(Props).
+    void finishVariable(const std::vector<const T *> &statement, const std::string &container, bool bare = false) {
       if (statement.size() < 2)
         return;
       const T &first = *statement[0];
-      if (first.kind == TK::Ident && (first.text == "struct" || first.text == "typedef" || first.text == "return"))
+      if (first.kind == TK::Ident && (first.text == "struct" || first.text == "return"))
         return;
-      // Resource macros such as TEXTURE2D(_BaseMap); SAMPLER(sampler_BaseMap);
-      if (statement.size() == 4 && first.kind == TK::Ident && isPunct(*statement[1], '(') &&
-          statement[2]->kind == TK::Ident && isPunct(*statement[3], ')')) {
+      if (first.kind == TK::Ident && first.text == "typedef") {
+        // typedef float3 Color; typedef float Weights[4];
+        const T *name = nullptr;
+        for (size_t i = 1; i < statement.size() && !isPunct(*statement[i], '['); ++i) {
+          if (statement[i]->kind == TK::Ident)
+            name = statement[i];
+        }
+        if (name && name != statement[1])
+          addDecl(DeclKind::Struct, *name, collapse(src_.substr(first.span.begin, statement.back()->span.end - first.span.begin)), "", first.span.begin, statement.back()->span.end);
+        return;
+      }
+      // Resource macros such as TEXTURE2D(_BaseMap); SAMPLER(sampler_BaseMap); and the ones that take the type
+      // first, UNITY_DEFINE_INSTANCED_PROP(float4, _Color): an upper-case macro of plain names declares the last.
+      if (isMacroCall(statement) && first.kind == TK::Ident) {
         std::string_view macro = first.text;
         bool upper = std::all_of(macro.begin(), macro.end(), [](char c) { return !std::islower(static_cast<unsigned char>(c)); });
-        if (upper) {
-          addDecl(DeclKind::Variable, *statement[2], collapse(src_.substr(first.span.begin, statement[3]->span.end - first.span.begin)), container, first.span.begin, statement[3]->span.end);
+        bool names = statement.size() >= 4;
+        for (size_t i = 2; i + 1 < statement.size(); ++i)
+          names = names && (i % 2 == 0 ? statement[i]->kind == TK::Ident : isPunct(*statement[i], ','));
+        const T &name = *statement[statement.size() - 2];
+        // A pair such as UNITY_INSTANCING_BUFFER_START(Props) ... _END(Props) declares the name once; with
+        // semicolons, the same name in two #if branches is two declarations the variant picks between.
+        if (upper && names && (!bare || bareDeclared_.insert(std::string(name.text)).second)) {
+          addDecl(DeclKind::Variable, name, collapse(src_.substr(first.span.begin, statement.back()->span.end - first.span.begin)), container, first.span.begin, statement.back()->span.end);
         }
         return;
       }
       for (const T *token : statement) {
-        if (isPunct(*token, '='))
-          break;
+        if (isPunct(*token, '=') || isPunct(*token, ':'))
+          break; // an initializer or a register(t0): what is before it decides
         if (isPunct(*token, '('))
           return; // prototype or macro invocation
       }
@@ -549,7 +654,9 @@ namespace {
         Endif } kind;
     };
     std::vector<Branch> branches_;
+    int dead_ = 0; // how deep in an #if 0 the tokenizer is, counting the #if blocks inside it
     std::set<size_t> declared_; // where the names declared so far begin
+    std::set<std::string, std::less<>> bareDeclared_; // the names macros with no semicolon after them have declared
     HlslScan out_;
   };
 } // namespace
