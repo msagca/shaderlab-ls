@@ -2,6 +2,7 @@ name: release
 
 # Tagging is what publishes: push v<major>.<minor>.<patch> and the binaries for it appear on the release of the same
 # name. The tag has to agree with the version in CMakeLists.txt, which stays the one place the version is written.
+# Publishing a release with a new tag on github.com pushes that tag too, and its release gets the binaries the same way.
 # workflow_dispatch builds, packages and tests the same way but publishes nothing, for trying the packaging out.
 on:
   push:
@@ -165,8 +166,15 @@ jobs:
         working-directory: dist
         run: sha256sum * > SHA256SUMS
 
+      # github.com makes a tag only together with its release, so a release may already exist: the binaries go onto
+      # it, replacing any of the same name, rather than failing to create a second one.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber dist/*
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes dist/*
+          fi
