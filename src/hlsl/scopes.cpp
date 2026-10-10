@@ -1,4 +1,6 @@
 #include "hlsl/scopes.h"
+#include <algorithm>
+#include <cctype>
 #include <map>
 #include <string>
 #include <vector>
@@ -30,6 +32,7 @@ std::unordered_map<size_t, size_t> localBindings(std::string_view text, Span ran
   int parens = 0;
   bool signature = false; // in a function's parameter list at file scope
   bool signed_ = false; // a parameter list closed at file scope; its body not opened yet
+  bool macroParameter = false; // in the arguments of a parameter that is a macro, TEXTURE2D_PARAM(tex, samp)
   std::map<std::string, size_t, std::less<>> parameters;
   std::vector<Scope> scopes; // empty outside a function body
   bool awaitingBody = false; // a header just closed: a '{' now opens its block
@@ -41,6 +44,10 @@ std::unordered_map<size_t, size_t> localBindings(std::string_view text, Span ran
   };
   auto typedBefore = [&](size_t k) {
     return k > 0 && ((ident(k - 1) && !hlsl::findKeyword(str(k - 1))) || punct(k - 1, '>'));
+  };
+  auto upperCase = [&](size_t k) {
+    std::string_view name = str(k);
+    return std::none_of(name.begin(), name.end(), [](char c) { return std::islower(static_cast<unsigned char>(c)); });
   };
   auto declaratorAfter = [&](size_t k) {
     return punct(k + 1, ',') || punct(k + 1, ';') || punct(k + 1, '=') || punct(k + 1, ')') || punct(k + 1, ':') || punct(k + 1, '[');
@@ -58,6 +65,8 @@ std::unordered_map<size_t, size_t> localBindings(std::string_view text, Span ran
         if (depth == 0 && parens == 0 && k > 0 && ident(k - 1) && typedBefore(k - 1)) {
           signature = true;
           parameters.clear();
+        } else if (signature && parens == 1 && k > 1 && ident(k - 1) && upperCase(k - 1) && (punct(k - 2, '(') || punct(k - 2, ','))) {
+          macroParameter = true;
         } else if (!scopes.empty() && k > 0 && ident(k - 1)) {
           std::string_view keyword = str(k - 1);
           if (keyword == "for" || keyword == "if" || keyword == "while" || keyword == "switch")
@@ -66,6 +75,8 @@ std::unordered_map<size_t, size_t> localBindings(std::string_view text, Span ran
         ++parens;
       } else if (c == ')') {
         parens = std::max(parens - 1, 0);
+        if (parens == 1)
+          macroParameter = false;
         if (signature && parens == 0) {
           signature = false;
           signed_ = true;
@@ -109,6 +120,9 @@ std::unordered_map<size_t, size_t> localBindings(std::string_view text, Span ran
     if (signature) {
       // A parameter: at the list's own level, not inside a default value.
       if (parens == 1 && typedBefore(k) && declaratorAfter(k))
+        declare(k);
+      // Each plain name a parameter macro is given is one: TEXTURE2D_PARAM(tex, samp) declares tex and samp.
+      else if (macroParameter && parens == 2 && (punct(k - 1, '(') || punct(k - 1, ',')) && (punct(k + 1, ',') || punct(k + 1, ')')))
         declare(k);
       continue;
     }
