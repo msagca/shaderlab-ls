@@ -388,6 +388,36 @@ def main():
     check("Tint" in outline and "K" in outline, "and both functions are symbols: " + str(outline))
     client.notify("textDocument/didClose", {"textDocument": {"uri": macro_uri}})
 
+    # Methods of a struct, each in its own #if: a call inside the struct and one through an instance find them.
+    method_kernel = "\n".join([
+        "#pragma kernel K",
+        "struct Surface {",
+        "    float roughness;",
+        "#if defined(_A)",
+        "    inline float Specular(float x) { return x * roughness; }",
+        "#endif",
+        "#if defined(_A)",
+        "    inline float Shade(float x) { return Specular(x); }",
+        "#endif",
+        "    float metallic;",
+        "};",
+        "[numthreads(1, 1, 1)] void K() { Surface s; s.Shade(s.metallic); }",
+    ])
+    method_uri = uri_for(FIXTURES / "unsaved_method_kernel.compute")
+    method_lines = method_kernel.split("\n")
+    client.notify("textDocument/didOpen", {"textDocument": {"uri": method_uri, "languageId": "hlsl", "version": 1, "text": method_kernel}})
+    def method_at(line, needle):
+        return {"textDocument": {"uri": method_uri}, "position": {"line": line, "character": method_lines[line].index(needle) + 1}}
+    for line, needle, expected, description in [(7, "Specular(x)", 4, "a method called from another method of its struct"),
+                                                 (11, "Shade(", 7, "a method called through an instance"),
+                                                 (11, "metallic)", 9, "a field declared after the methods")]:
+        target = client.request("textDocument/definition", method_at(line, needle))
+        check(target is not None and target["range"]["start"]["line"] == expected, f"definition of {description}")
+    hover = client.request("textDocument/hover", method_at(7, "Specular(x)"))
+    check(hover is not None and "inline float Specular(float x)" in hover["contents"]["value"] and "In `Surface`" in hover["contents"]["value"],
+          "and its hover shows the method and its struct")
+    client.notify("textDocument/didClose", {"textDocument": {"uri": method_uri}})
+
     # An include guard written as #if !defined(X) is no condition on what it guards, as with #ifndef X.
     with tempfile.TemporaryDirectory() as temp:
         folder = pathlib.Path(temp)
