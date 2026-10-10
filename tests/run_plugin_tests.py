@@ -281,7 +281,9 @@ def main():
     check(builds(lines) == 1, "the build runs")
     check(before(lines, r"^attach buf=1 client=1", r"^notify .*shaderlab-ls built"), "the stale server serves meanwhile")
     check(before(lines, r"^notify .*shaderlab-ls built", r"^detach buf=1 client=1"), "the stale client is dropped when the build lands")
-    check(before(lines, r"^detach buf=1 client=1", r"^attach buf=1 client=2"), "and the same buffer is moved onto the new server")
+    # The old client shuts down while the new one starts, so the two can be logged in either order.
+    check(before(lines, r"^notify .*shaderlab-ls built", r"^attach buf=1 client=2") and value(lines, "clients") == "1",
+          "and the same buffer is moved onto the new server")
 
     print("\nan executable newer than the sources")
     fixture = fixture_for("current", server, stale=False)
