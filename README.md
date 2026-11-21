@@ -123,3 +123,7 @@ require('conform').setup {
 
 Or leave the filetypes out of `formatters_by_ft` and pass `lsp_format = 'fallback'` to format through the running
 server.
+
+## License
+
+[MIT](LICENSE)
