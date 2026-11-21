@@ -1,8 +1,8 @@
-#include "hlsl/builtins.h"
 #include <algorithm>
 #include <cctype>
+#include <common/util.hpp>
+#include <hlsl/builtins.hpp>
 #include <unordered_set>
-#include "common/util.h"
 namespace sls::hlsl {
 namespace {
   // Microsoft HLSL reference: keywords, data types, semantics, attributes, object methods and intrinsic functions.

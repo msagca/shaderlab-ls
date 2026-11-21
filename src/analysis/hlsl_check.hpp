@@ -1,10 +1,10 @@
 #pragma once
+#include <analysis/analysis.hpp>
+#include <compiler/compiler.hpp>
 #include <filesystem>
 #include <functional>
 #include <string>
 #include <vector>
-#include "analysis/analysis.h"
-#include "compiler/compiler.h"
 namespace sls {
 enum class CompilerChoice {
   Auto, // FXC, as Unity uses for Direct3D 11, and DXC for `#pragma use_dxc` or where FXC does not exist

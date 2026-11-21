@@ -1,13 +1,13 @@
 #pragma once
+#include <analysis/analysis.hpp>
 #include <filesystem>
+#include <index/index.hpp>
 #include <map>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "analysis/analysis.h"
-#include "index/index.h"
 namespace sls {
 // The files that references and renames reach beyond the document they start in: the shader files in the workspace
 // folders, each as the editor has it - an open document as it is in the editor, any other as it is on disk.

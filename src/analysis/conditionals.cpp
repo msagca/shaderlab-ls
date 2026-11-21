@@ -1,9 +1,9 @@
-#include "analysis/conditionals.h"
 #include <algorithm>
+#include <analysis/conditionals.hpp>
 #include <cctype>
+#include <common/util.hpp>
 #include <cstdlib>
-#include "common/util.h"
-#include "hlsl/lexer.h"
+#include <hlsl/lexer.hpp>
 namespace sls {
 namespace {
   using Value = std::optional<long long>; // nullopt: not known

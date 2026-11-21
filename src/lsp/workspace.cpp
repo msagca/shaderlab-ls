@@ -1,8 +1,8 @@
-#include "lsp/workspace.h"
+#include <common/util.hpp>
+#include <index/files.hpp>
+#include <lsp/workspace.hpp>
 #include <mutex>
 #include <set>
-#include "common/util.h"
-#include "index/files.h"
 namespace fs = std::filesystem;
 namespace sls {
 namespace {

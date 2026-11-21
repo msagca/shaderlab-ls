@@ -1,7 +1,7 @@
 #pragma once
+#include <common/text.hpp>
 #include <string_view>
 #include <vector>
-#include "common/text.h"
 namespace sls {
 enum class HlslTok { Ident,
   Number,

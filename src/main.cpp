@@ -4,17 +4,17 @@
 #else
 #include <csignal>
 #endif
+#include <analysis/analysis.hpp>
+#include <analysis/hlsl_check.hpp>
+#include <common/util.hpp>
 #include <cstdio>
 #include <cstring>
+#include <format/formatter.hpp>
 #include <iostream>
 #include <iterator>
+#include <lsp/server.hpp>
+#include <lsp/transport.hpp>
 #include <string>
-#include "analysis/analysis.h"
-#include "analysis/hlsl_check.h"
-#include "common/util.h"
-#include "format/formatter.h"
-#include "lsp/server.h"
-#include "lsp/transport.h"
 namespace {
 void printUsage() {
   std::printf(

@@ -1,11 +1,11 @@
-#include "format/formatter.h"
 #include <algorithm>
+#include <common/text.hpp>
+#include <common/util.hpp>
+#include <format/formatter.hpp>
 #include <optional>
+#include <shaderlab/lexer.hpp>
+#include <shaderlab/reference.hpp>
 #include <vector>
-#include "common/text.h"
-#include "common/util.h"
-#include "shaderlab/lexer.h"
-#include "shaderlab/reference.h"
 namespace sls {
 namespace {
   enum class Context { File,

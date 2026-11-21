@@ -1,7 +1,7 @@
 #pragma once
+#include <analysis/analysis.hpp>
+#include <lsp/features.hpp>
 #include <nlohmann/json.hpp>
-#include "analysis/analysis.h"
-#include "lsp/features.h"
 namespace sls {
 // The token types and modifiers semanticTokens() numbers its tokens by, for the server's capabilities.
 nlohmann::json semanticTokensLegend();

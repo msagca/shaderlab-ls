@@ -1,10 +1,11 @@
 #pragma once
+#include <analysis/analysis.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
-#include <functional>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -14,7 +15,6 @@
 #include <thread>
 #include <unordered_map>
 #include <vector>
-#include "analysis/analysis.h"
 namespace sls {
 // What the workspace's shader files declare, include and name, kept current as they change, so that questions about
 // the whole workspace - which files name X, which files include Y, what is called Z - are lookups rather than

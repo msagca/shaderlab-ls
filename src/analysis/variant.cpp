@@ -1,6 +1,6 @@
-#include "analysis/variant.h"
 #include <algorithm>
-#include "shaderlab/reference.h"
+#include <analysis/variant.hpp>
+#include <shaderlab/reference.hpp>
 namespace sls {
 bool isNoKeyword(std::string_view keyword) {
   return !keyword.empty() && keyword.find_first_not_of('_') == std::string_view::npos;

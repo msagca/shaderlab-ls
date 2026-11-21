@@ -1,6 +1,6 @@
-#include "format/diff.h"
 #include <algorithm>
 #include <cctype>
+#include <format/diff.hpp>
 #include <optional>
 #include <string>
 #include <utility>

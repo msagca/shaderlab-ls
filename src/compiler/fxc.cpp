@@ -1,12 +1,12 @@
-#include "compiler/fxc.h"
+#include <compiler/fxc.hpp>
 #ifdef _WIN32
-#include <windows.h>
 #include <d3dcompiler.h>
+#include <windows.h>
 #endif
+#include <common/util.hpp>
 #include <cstdlib>
 #include <set>
 #include <unordered_map>
-#include "common/util.h"
 namespace fs = std::filesystem;
 namespace sls {
 #ifdef _WIN32

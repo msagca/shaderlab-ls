@@ -1,21 +1,21 @@
-#include "compiler/dxc.h"
+#include <compiler/dxc.hpp>
 #ifdef _WIN32
-#include <windows.h>
 #include <objbase.h>
+#include <windows.h>
 #else
 #include <dlfcn.h>
 #endif
-// DXC's API headers, fetched at configure time (see CMakeLists.txt). On Linux WinAdapter.h stands in for the COM
-// types; its IUnknown is header-only, so nothing needs linking: the library is loaded when first used.
-#include "dxc/dxcapi.h"
 #include <algorithm>
 #include <cctype>
+#include <common/util.hpp>
 #include <cstdlib>
+// DXC's API headers, fetched at configure time (see CMakeLists.txt). On Linux WinAdapter.h stands in for the COM
+// types; its IUnknown is header-only, so nothing needs linking: the library is loaded when first used.
+#include <dxc/dxcapi.h>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <set>
-#include "common/util.h"
 namespace fs = std::filesystem;
 namespace sls {
 namespace {

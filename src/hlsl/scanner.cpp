@@ -1,9 +1,9 @@
-#include "hlsl/scanner.h"
 #include <algorithm>
 #include <cctype>
+#include <common/util.hpp>
+#include <hlsl/scanner.hpp>
 #include <optional>
 #include <set>
-#include "common/util.h"
 namespace sls {
 namespace {
   enum class TK { Ident,

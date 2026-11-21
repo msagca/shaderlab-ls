@@ -1,11 +1,11 @@
-#include "lsp/transport.h"
+#include <lsp/transport.hpp>
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
 #endif
+#include <common/util.hpp>
 #include <cstdio>
 #include <cstdlib>
-#include "common/util.h"
 namespace sls {
 Transport::Transport() {
 #ifdef _WIN32

@@ -1,8 +1,8 @@
 #pragma once
+#include <shaderlab/model.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "shaderlab/model.h"
 namespace sls {
 enum class Tok {
   End,

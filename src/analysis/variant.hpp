@@ -1,8 +1,8 @@
 #pragma once
+#include <hlsl/scanner.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "hlsl/scanner.h"
 namespace sls {
 // What a variant is chosen by: for each keyword set, the document's own choice first, then the `keywords` setting's,
 // then Unity's default variant.

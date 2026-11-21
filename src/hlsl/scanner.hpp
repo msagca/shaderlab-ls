@@ -1,8 +1,8 @@
 #pragma once
+#include <common/text.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "common/text.h"
 namespace sls {
 struct PragmaArg {
   std::string text;

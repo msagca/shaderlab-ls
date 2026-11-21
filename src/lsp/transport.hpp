@@ -1,8 +1,8 @@
 #pragma once
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
-#include <nlohmann/json.hpp>
 namespace sls {
 // JSON-RPC over stdio with LSP "Content-Length" framing.
 class Transport {

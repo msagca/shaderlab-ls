@@ -1,13 +1,13 @@
-#include "lsp/server.h"
+#include <analysis/variant.hpp>
+#include <common/util.hpp>
+#include <compiler/dxc.hpp>
+#include <compiler/fxc.hpp>
 #include <cstdio>
-#include "common/util.h"
-#include "format/diff.h"
-#include "format/formatter.h"
-#include "analysis/variant.h"
-#include "lsp/semantic_tokens.h"
-#include "compiler/dxc.h"
-#include "compiler/fxc.h"
-#include "unity/project.h"
+#include <format/diff.hpp>
+#include <format/formatter.hpp>
+#include <lsp/semantic_tokens.hpp>
+#include <lsp/server.hpp>
+#include <unity/project.hpp>
 using json = nlohmann::json;
 namespace sls {
 namespace {

@@ -1,15 +1,15 @@
-#include "lsp/semantic_tokens.h"
 #include <algorithm>
 #include <cctype>
+#include <common/util.hpp>
+#include <hlsl/builtins.hpp>
+#include <hlsl/lexer.hpp>
+#include <lsp/semantic_tokens.hpp>
 #include <map>
 #include <set>
+#include <shaderlab/lexer.hpp>
+#include <shaderlab/reference.hpp>
 #include <string>
 #include <unordered_map>
-#include "common/util.h"
-#include "hlsl/builtins.h"
-#include "hlsl/lexer.h"
-#include "shaderlab/lexer.h"
-#include "shaderlab/reference.h"
 using json = nlohmann::json;
 namespace sls {
 namespace {

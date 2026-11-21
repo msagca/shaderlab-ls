@@ -1,12 +1,12 @@
-#include "shaderlab/parser.h"
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <common/util.hpp>
 #include <cstring>
+#include <shaderlab/lexer.hpp>
+#include <shaderlab/parser.hpp>
+#include <shaderlab/reference.hpp>
 #include <string>
-#include "common/util.h"
-#include "shaderlab/lexer.h"
-#include "shaderlab/reference.h"
 namespace sls {
 const MaterialProperty *ShaderFile::findProperty(std::string_view propertyName) const {
   for (const MaterialProperty &property : properties) {

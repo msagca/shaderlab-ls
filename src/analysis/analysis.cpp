@@ -1,16 +1,16 @@
-#include "analysis/analysis.h"
-#include "analysis/conditionals.h"
 #include <algorithm>
-#include <cstdlib>
-#include <functional>
-#include <deque>
+#include <analysis/analysis.hpp>
+#include <analysis/conditionals.hpp>
 #include <cctype>
+#include <common/util.hpp>
+#include <cstdlib>
+#include <deque>
+#include <functional>
 #include <map>
 #include <mutex>
-#include "common/util.h"
-#include "shaderlab/parser.h"
-#include "shaderlab/reference.h"
-#include "unity/project.h"
+#include <shaderlab/parser.hpp>
+#include <shaderlab/reference.hpp>
+#include <unity/project.hpp>
 namespace fs = std::filesystem;
 namespace sls {
 DocumentKind documentKindFor(const fs::path &path) {

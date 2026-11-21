@@ -1,18 +1,18 @@
-#include "lsp/features.h"
 #include <algorithm>
+#include <analysis/conditionals.hpp>
 #include <cctype>
+#include <common/util.hpp>
 #include <deque>
+#include <hlsl/builtins.hpp>
+#include <hlsl/lexer.hpp>
+#include <hlsl/scopes.hpp>
+#include <lsp/features.hpp>
 #include <set>
+#include <shaderlab/lexer.hpp>
+#include <shaderlab/reference.hpp>
 #include <tuple>
+#include <unity/project.hpp>
 #include <unordered_map>
-#include "analysis/conditionals.h"
-#include "common/util.h"
-#include "hlsl/builtins.h"
-#include "hlsl/lexer.h"
-#include "hlsl/scopes.h"
-#include "shaderlab/lexer.h"
-#include "shaderlab/reference.h"
-#include "unity/project.h"
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 namespace sls {
@@ -593,7 +593,7 @@ namespace {
         if (tokens[k].kind != CodeToken::Ident || reader.str(k) != name)
           continue;
         bool declarator = k + 1 < tokens.size() && (reader.punct(k + 1, ';') || reader.punct(k + 1, ',') || reader.punct(k + 1, '=') ||
-                                                      reader.punct(k + 1, ')') || reader.punct(k + 1, ':') || reader.punct(k + 1, '['));
+                                                     reader.punct(k + 1, ')') || reader.punct(k + 1, ':') || reader.punct(k + 1, '['));
         if (!declarator)
           continue;
         if (auto type = reader.before(k))
@@ -1518,7 +1518,7 @@ namespace {
         }
       }
       uses.refusal = "Struct members are matched by name alone, not by their struct's type, so renaming " + name +
-        " could also rename another struct's member or a swizzle.";
+                     " could also rename another struct's member or a swizzle.";
       sortSpans(uses.spans);
       return uses;
     }

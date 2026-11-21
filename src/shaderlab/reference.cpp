@@ -1,5 +1,5 @@
-#include "shaderlab/reference.h"
-#include "common/util.h"
+#include <common/util.hpp>
+#include <shaderlab/reference.hpp>
 namespace sls::ref {
 namespace {
   constexpr Entry kShaderBlock[] = {

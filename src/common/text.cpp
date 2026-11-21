@@ -1,5 +1,5 @@
-#include "common/text.h"
 #include <algorithm>
+#include <common/text.hpp>
 namespace sls {
 namespace {
   // Length in bytes of the UTF-8 sequence starting with `lead`.

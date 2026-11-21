@@ -1,18 +1,18 @@
 #pragma once
+#include <analysis/variant.hpp>
 #include <chrono>
+#include <common/text.hpp>
+#include <compiler/compiler.hpp>
 #include <filesystem>
+#include <hlsl/scanner.hpp>
 #include <map>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <shaderlab/model.hpp>
 #include <string>
 #include <vector>
-#include "common/text.h"
-#include "analysis/variant.h"
-#include "compiler/compiler.h"
-#include "hlsl/scanner.h"
-#include "shaderlab/model.h"
 namespace sls {
 enum class DocumentKind {
   ShaderLab, // .shader

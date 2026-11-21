@@ -1,9 +1,9 @@
 #pragma once
+#include <common/text.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "common/text.h"
 namespace sls {
 // Shader code blocks, per "Shader code blocks in ShaderLab reference".
 enum class BlockKind { HlslProgram,
