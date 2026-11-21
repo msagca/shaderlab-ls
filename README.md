@@ -41,14 +41,35 @@ The executable ends up in `build/`.
 
 ## Usage
 
+```text
+shaderlab-ls [--stdio]
+shaderlab-ls --check <file> [check options]
+shaderlab-ls --format <file|-> [format options]
+shaderlab-ls --version | --help
 ```
-shaderlab-ls --stdio                        language server over stdio
-shaderlab-ls --check <file> [--editor <path>] [--dxc <library>] [--compiler auto|fxc|dxc|none]
-                                            print diagnostics and exit (1 if there are errors)
-shaderlab-ls --format <file> [--assume-filename <path>] [--clang-format <exe>]
-                                            print the formatted file (use - to read stdin, and --assume-filename to
-                                            say where it lives); exit 1 if refused
-```
+
+Modes:
+
+| option | effect |
+| --- | --- |
+| `--stdio` | Run the language server over stdio (the default). |
+| `--check <file>` | Print diagnostics for a `.shader`, `.compute` or `.hlsl` file; exit 1 on errors. |
+| `--format <file\|->` | Print the formatted file (`-` reads stdin); exit 1 if it can't be formatted. |
+
+Check options:
+
+| option | effect |
+| --- | --- |
+| `--editor <path>` | Unity editor to take includes from. |
+| `--dxc <library>` | DXC library to try first. |
+| `--compiler <name>` | `auto` (default), `fxc`, `dxc` or `none`. |
+
+Format options:
+
+| option | effect |
+| --- | --- |
+| `--assume-filename <path>` | Where stdin's text lives, which picks the `.clang-format` that applies. |
+| `--clang-format <exe>` | The clang-format to format with. |
 
 ### Settings
 

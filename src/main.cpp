@@ -18,16 +18,30 @@
 namespace {
 void printUsage() {
   std::printf(
-    "shaderlab-ls %s - ShaderLab/HLSL language server for Unity shaders (FXC, DXC)\n\n"
+    "shaderlab-ls %s - ShaderLab/HLSL language server for Unity\n"
+    "\n"
     "Usage:\n"
-    "  shaderlab-ls [--stdio]                  Run the language server over stdio.\n"
-    "  shaderlab-ls --check <file> [--editor <path>] [--dxc <library>] [--compiler auto|fxc|dxc|none]\n"
-    "                                          Print diagnostics for a .shader/.compute/.hlsl file.\n"
-    "  shaderlab-ls --format <file|-> [--assume-filename <path>] [--clang-format <exe>]\n"
-    "                                          Write a formatted .shader/.compute/.hlsl/.glsl file to stdout\n"
-    "                                          (- reads stdin; --assume-filename says which .clang-format\n"
-    "                                          applies to it).\n"
-    "  shaderlab-ls --version\n",
+    "  shaderlab-ls [--stdio]\n"
+    "  shaderlab-ls --check <file> [check options]\n"
+    "  shaderlab-ls --format <file|-> [format options]\n"
+    "  shaderlab-ls --version | --help\n"
+    "\n"
+    "Modes:\n"
+    "  --stdio                   Run the language server over stdio.\n"
+    "  --check <file>            Print diagnostics for a .shader, .compute\n"
+    "                            or .hlsl file; exit 1 on errors.\n"
+    "  --format <file|->         Print the formatted file (- reads stdin);\n"
+    "                            exit 1 if it can't be formatted.\n"
+    "\n"
+    "Check options:\n"
+    "  --editor <path>           Unity editor to take includes from.\n"
+    "  --dxc <library>           DXC library to try first.\n"
+    "  --compiler <name>         auto (default), fxc, dxc or none.\n"
+    "\n"
+    "Format options:\n"
+    "  --assume-filename <path>  Where stdin's text lives, which picks\n"
+    "                            the .clang-format that applies.\n"
+    "  --clang-format <exe>      The clang-format to format with.\n",
     SHADERLAB_LS_VERSION);
 }
 // Windows opens the standard streams in text mode, which would rewrite the newlines of a formatted file.
