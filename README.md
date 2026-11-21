@@ -113,14 +113,22 @@ executable on `PATH`, and map the filetypes yourself:
 
 ```lua
 vim.filetype.add {
-  extension = { shader = 'shaderlab', hlsl = 'hlsl', compute = 'hlsl', cginc = 'hlsl', glslinc = 'glsl' },
+  extension = {
+    shader = 'shaderlab',
+    hlsl = 'hlsl',
+    compute = 'hlsl',
+    cginc = 'hlsl',
+    glslinc = 'glsl',
+  },
 }
 vim.api.nvim_create_autocmd('FileType', {
   pattern = { 'shaderlab', 'hlsl' },
-  callback = function() vim.bo.commentstring = '// %s' end,  -- for gc, which ftplugin/ would otherwise set
+  callback = function() vim.bo.commentstring = '// %s' end,
 })
 vim.lsp.enable 'shaderlab_ls'
 ```
+
+The autocmd sets `commentstring` for `gc`, which `ftplugin/` would otherwise set.
 
 ### conform.nvim
 
@@ -131,14 +139,24 @@ the formatter for the filetypes:
 require('conform').setup {
   formatters = {
     shaderlab_ls = {
-      command = function() return vim.lsp.config.shaderlab_ls.executable() end,  -- the exe the LSP config found
-      -- The layout comes from the .clang-format that applies to the file, so tell it where the buffer lives.
-      args = function(_, ctx) return { '--format', '-', '--assume-filename', ctx.filename } end,
+      command = function()
+        return vim.lsp.config.shaderlab_ls.executable()
+      end,
+      args = function(_, ctx)
+        return { '--format', '-', '--assume-filename', ctx.filename }
+      end,
     },
   },
-  formatters_by_ft = { shaderlab = { 'shaderlab_ls' }, hlsl = { 'shaderlab_ls' }, glsl = { 'shaderlab_ls' } },
+  formatters_by_ft = {
+    shaderlab = { 'shaderlab_ls' },
+    hlsl = { 'shaderlab_ls' },
+    glsl = { 'shaderlab_ls' },
+  },
 }
 ```
+
+`command` runs the executable the LSP config found. The layout comes from the `.clang-format` that applies to the
+file, so `--assume-filename` tells it where the buffer lives.
 
 Or leave the filetypes out of `formatters_by_ft` and pass `lsp_format = 'fallback'` to format through the running
 server.
