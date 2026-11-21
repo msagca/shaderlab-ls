@@ -1,13 +1,13 @@
-#include "index/index.h"
 #include <algorithm>
 #include <cctype>
+#include <common/util.hpp>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <index/files.hpp>
+#include <index/index.hpp>
+#include <unity/project.hpp>
 #include <unordered_set>
-#include "common/util.h"
-#include "index/files.h"
-#include "unity/project.h"
 namespace fs = std::filesystem;
 namespace sls {
 namespace {

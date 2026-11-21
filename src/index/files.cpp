@@ -1,7 +1,7 @@
-#include "index/files.h"
+#include <common/util.hpp>
+#include <index/files.hpp>
 #include <map>
 #include <mutex>
-#include "common/util.h"
 namespace fs = std::filesystem;
 namespace sls {
 bool isShaderSource(const fs::path &path) {

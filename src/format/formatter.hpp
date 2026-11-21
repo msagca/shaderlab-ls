@@ -1,7 +1,7 @@
 #pragma once
+#include <format/style.hpp>
 #include <string>
 #include <string_view>
-#include "format/style.h"
 namespace sls {
 struct FormatResult {
   bool ok = false;

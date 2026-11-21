@@ -1,9 +1,9 @@
 #pragma once
+#include <analysis/analysis.hpp>
 #include <filesystem>
-#include <stdexcept>
+#include <lsp/workspace.hpp>
 #include <nlohmann/json.hpp>
-#include "analysis/analysis.h"
-#include "lsp/workspace.h"
+#include <stdexcept>
 namespace sls {
 struct FeatureContext {
   Encoding encoding = Encoding::Utf16;

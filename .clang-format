@@ -2,14 +2,12 @@ Language: Cpp
 BasedOnStyle: LLVM
 AlignAfterOpenBracket: DontAlign
 AlignEscapedNewlines: DontAlign
-AlignTrailingComments: Never
+AlignTrailingComments: false
 AllowAllArgumentsOnNextLine: false
 AllowAllParametersOfDeclarationOnNextLine: false
 AllowShortBlocksOnASingleLine: Empty
 AllowShortFunctionsOnASingleLine: Empty
 AlwaysBreakBeforeMultilineStrings: true
-BinPackArguments: false
-BinPackParameters: false
 BreakArrays: false
 ColumnLimit: 0
 CompactNamespaces: true
@@ -23,7 +21,8 @@ MaxEmptyLinesToKeep: 0
 NamespaceIndentation: Inner
 PPIndentWidth: 2
 PackConstructorInitializers: NextLineOnly
-ReflowComments: false
+ReflowComments: Never
 RequiresClausePosition: WithPreceding
-SortIncludes: Never
+SortIncludes:
+  Enabled: true
 SpacesInContainerLiterals: false

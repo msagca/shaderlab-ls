@@ -1,4 +1,5 @@
 #pragma once
+#include <common/text.hpp>
 #include <functional>
 #include <map>
 #include <optional>
@@ -6,7 +7,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-#include "common/text.h"
 namespace sls {
 // What the preprocessor is known to have defined at some point in the code. Everything here is three-valued: a
 // name is defined, not defined, or not known to be either, and a condition that depends on what is not known is

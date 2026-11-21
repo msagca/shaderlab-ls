@@ -1,20 +1,20 @@
-#include "format/style.h"
+#include <format/style.hpp>
 #ifdef _WIN32
 #include <windows.h>
 #else
+#include <cerrno>
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <cerrno>
 extern char **environ;
 #endif
 #include <algorithm>
 #include <charconv>
+#include <common/util.hpp>
 #include <map>
 #include <thread>
 #include <vector>
-#include "common/util.h"
 namespace sls {
 namespace {
   // Unity's own layout: four spaces, braces on their own line, no empty lines. Lines stay where the author broke

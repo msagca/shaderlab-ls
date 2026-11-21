@@ -1,6 +1,6 @@
-#include "shaderlab/lexer.h"
 #include <cctype>
-#include "common/util.h"
+#include <common/util.hpp>
+#include <shaderlab/lexer.hpp>
 namespace sls {
 const char *blockKeyword(BlockKind kind) {
   switch (kind) {

@@ -1,19 +1,19 @@
 #pragma once
+#include <analysis/analysis.hpp>
+#include <analysis/hlsl_check.hpp>
 #include <chrono>
 #include <condition_variable>
+#include <index/index.hpp>
+#include <lsp/features.hpp>
+#include <lsp/transport.hpp>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <thread>
 #include <vector>
-#include <nlohmann/json.hpp>
-#include "analysis/analysis.h"
-#include "analysis/hlsl_check.h"
-#include "index/index.h"
-#include "lsp/features.h"
-#include "lsp/transport.h"
 namespace sls {
 class Server {
 public:

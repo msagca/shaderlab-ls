@@ -1,11 +1,11 @@
-#include "hlsl/scopes.h"
 #include <algorithm>
 #include <cctype>
+#include <hlsl/builtins.hpp>
+#include <hlsl/lexer.hpp>
+#include <hlsl/scopes.hpp>
 #include <map>
 #include <string>
 #include <vector>
-#include "hlsl/builtins.h"
-#include "hlsl/lexer.h"
 namespace sls {
 namespace {
   struct Scope {

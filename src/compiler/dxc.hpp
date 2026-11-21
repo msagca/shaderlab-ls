@@ -1,9 +1,9 @@
 #pragma once
+#include <compiler/compiler.hpp>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "compiler/compiler.h"
 namespace sls {
 // DXC, loaded at run time from dxcompiler.dll or libdxcompiler.so. Unity compiles with it for Direct3D 12, Vulkan
 // and Metal when a shader asks for `#pragma use_dxc`; here it is also the compiler on platforms without FXC.

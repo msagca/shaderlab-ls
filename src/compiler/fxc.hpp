@@ -1,8 +1,8 @@
 #pragma once
+#include <compiler/compiler.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "compiler/compiler.h"
 namespace sls {
 // Thin wrapper over D3DCompile / D3DPreprocess from d3dcompiler_47.dll, loaded at runtime. The compiler Unity uses
 // for its default Direct3D 11 target; it exists on Windows only.

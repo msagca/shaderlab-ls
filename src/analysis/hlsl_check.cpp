@@ -1,14 +1,14 @@
-#include "analysis/hlsl_check.h"
-#include "analysis/variant.h"
 #include <algorithm>
+#include <analysis/hlsl_check.hpp>
+#include <analysis/variant.hpp>
 #include <cctype>
+#include <common/util.hpp>
+#include <compiler/dxc.hpp>
+#include <compiler/fxc.hpp>
 #include <map>
 #include <set>
-#include "common/util.h"
-#include "compiler/dxc.h"
-#include "compiler/fxc.h"
-#include "shaderlab/reference.h"
-#include "unity/project.h"
+#include <shaderlab/reference.hpp>
+#include <unity/project.hpp>
 namespace fs = std::filesystem;
 namespace sls {
 namespace {

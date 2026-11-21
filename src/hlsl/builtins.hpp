@@ -1,10 +1,10 @@
 #pragma once
 #include <optional>
+#include <shaderlab/reference.hpp>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
-#include "shaderlab/reference.h"
 namespace sls::hlsl {
 // Every table here has a signature and description paraphrased from the Microsoft HLSL reference.
 std::span<const ref::Entry> keywords();

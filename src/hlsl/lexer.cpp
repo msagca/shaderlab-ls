@@ -1,7 +1,7 @@
-#include "hlsl/lexer.h"
 #include <algorithm>
 #include <cctype>
-#include "common/util.h"
+#include <common/util.hpp>
+#include <hlsl/lexer.hpp>
 namespace sls {
 std::vector<HlslToken> lexHlsl(std::string_view text, Span range) {
   std::vector<HlslToken> result;
