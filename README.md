@@ -27,11 +27,16 @@ Optional, and found by themselves when installed:
 - On Linux, [DXC](https://github.com/microsoft/DirectXShaderCompiler/releases) with its `lib` folder on
   `LD_LIBRARY_PATH`, for HLSL diagnostics.
 
-To build it instead, with CMake 3.25+ and a C++20 compiler:
+To build it instead, with CMake 3.25+ and a C++20 compiler, on Windows:
 
 ```
-build.cmd            :: Windows
-./build.sh           # Linux
+build.cmd
+```
+
+On Linux:
+
+```
+./build.sh
 ```
 
 The executable ends up in `build/`.
