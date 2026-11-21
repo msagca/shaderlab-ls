@@ -1,7 +1,5 @@
 # shaderlab-ls
 
-[![build](https://github.com/msagca/shaderlab-ls/actions/workflows/build.yml/badge.svg)](https://github.com/msagca/shaderlab-ls/actions/workflows/build.yml)
-
 A language server for Unity ShaderLab (`.shader`) and the HLSL inside it, plus `.compute`, `.hlsl` and `.cginc`
 files. It reports ShaderLab and compiler (FXC/DXC) diagnostics, and offers completion, hover, go to definition,
 references, rename, signature help, symbols, semantic tokens and formatting.
