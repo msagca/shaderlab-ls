@@ -227,9 +227,12 @@ local function download(version, done)
       local directory = vim.fs.dirname(built)
       vim.fn.mkdir(directory, 'p')
       move_aside()  -- the same reason a build needs it: this replaces an executable that may be running
+      -- Windows ships bsdtar, which reads zips, in System32 since Windows 10 1803. It is named by full path because
+      -- Git's GNU tar, which does not read them, is often first on PATH. Expand-Archive is no substitute: a Neovim
+      -- started from PowerShell 7 hands Windows PowerShell a PSModulePath that loads 7's Archive module, which fails
+      -- there on a .NET method that only exists in 7.
       local unpack = windows
-          and { 'powershell', '-NoProfile', '-NonInteractive', '-Command',
-            ("Expand-Archive -Path '%s' -DestinationPath '%s' -Force"):format(archive, directory) }
+          and { vim.fs.joinpath(vim.env.SystemRoot or 'C:\\Windows', 'System32', 'tar.exe'), '-xf', archive, '-C', directory }
         or { 'tar', '-xzf', archive, '-C', directory }
       vim.system(unpack, { text = true }, function(unpacked)
         vim.schedule(function()
