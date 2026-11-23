@@ -421,12 +421,14 @@ std::vector<std::shared_ptr<const Analysis>> Server::includerAnalyses(const std:
   std::vector<std::filesystem::path> direct = index_.directIncluders(path);
   if (direct.empty())
     return {};
+  // Code is faded only when no includer compiles it, which checking some of them cannot tell. A file with more
+  // includers than are worth analyzing gets none, and its #if directives are worked out on their own.
   constexpr size_t kIncluders = 8;
+  if (direct.size() > kIncluders)
+    return {};
   Workspace workspace = workspaceFor(false);
   std::vector<std::shared_ptr<const Analysis>> result;
   for (const std::filesystem::path &includer : direct) {
-    if (result.size() >= kIncluders)
-      break;
     if (auto analysis = workspace.analysis(includer))
       result.push_back(std::move(analysis));
   }

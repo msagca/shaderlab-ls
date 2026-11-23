@@ -1249,6 +1249,28 @@ def main():
                                               '#define LOCAL_ON 1\n#include "Cond.hlsl"\nENDHLSL } } }\n', encoding="utf-8", newline="\n")
     client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(project / "Shaders/L.shader"), "type": 1}]})
     check(cond_faded(diags(client, cond_uri)) == [6, 9], "and faded only where no includer compiles it, again when an includer appears")
+    # More includers than are checked, each of which would fade the #else: what the unchecked ones compile is not known,
+    # so the file is worked out alone, where nothing it tests is false for certain.
+    def settled_faded(expected):
+        # Each file changed is analyzed again on its own; the last of those passes is the one that counts.
+        faded, deadline = None, time.time() + 15
+        while faded != expected and time.time() < deadline:
+            try:
+                faded = cond_faded(diags(client, cond_uri, timeout=max(deadline - time.time(), 0.1)))
+            except (AssertionError, queue.Empty):
+                break
+        return faded
+
+    many = [project / f"Shaders/Many{i}.shader" for i in range(7)]
+    for path in many:
+        path.write_text('Shader "M" { SubShader { Pass { HLSLPROGRAM\n#define LOCAL_ON 1\n#include "Cond.hlsl"\nENDHLSL } } }\n',
+                        encoding="utf-8", newline="\n")
+        client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(path), "type": 1}]})
+    check(settled_faded([]) == [], "and with more includers than are checked, it is not faded for what they define")
+    for path in many:
+        path.unlink()
+        client.notify("workspace/didChangeWatchedFiles", {"changes": [{"uri": uri_for(path), "type": 3}]})
+    check(settled_faded([6, 9]) == [6, 9], "and faded again once few enough include it to check them all")
     client.notify("textDocument/didClose", {"textDocument": {"uri": cond_uri}})
 
     for uri in (a_uri, common_uri):

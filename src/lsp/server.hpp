@@ -48,6 +48,7 @@ private:
   void reanalyze(const std::string &uri);
   AnalyzeOptions analyzeOptions(const std::vector<std::string> &variant);
   // The programs that include an include file directly, from the index, which its #if directives are worked out in.
+  // None when there are more than a few: their code could not be faded for certain without checking every one.
   std::vector<std::shared_ptr<const Analysis>> includerAnalyses(const std::filesystem::path &path);
   // Analyzes the open include files again whose includers changed.
   void includersChanged();
